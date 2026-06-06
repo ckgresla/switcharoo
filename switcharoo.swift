@@ -614,8 +614,15 @@ extension Notification.Name {
 private var switcharooEventTap: CFMachPort?
 
 func installCmdTabTap() {
+    guard switcharooEventTap == nil else { return }   // already installed
     guard AXIsProcessTrusted() else {
-        switcharooLog("CGEventTap: AX not trusted; Cmd+Tab interception disabled")
+        // The AX grant usually lands *after* first launch (the user is in
+        // System Settings while we're already running). Poll until it
+        // appears so Cmd+Tab starts working without a relaunch.
+        switcharooLog("CGEventTap: AX not trusted yet; retrying in 3s")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            installCmdTabTap()
+        }
         return
     }
     let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
@@ -672,10 +679,10 @@ func installCmdTabTap() {
     thread.start()
 }
 
-let HK_FORWARD: UInt32 = 1          // Opt+Ctrl+Tab — search mode forward
-let HK_REVERSE: UInt32 = 2          // Opt+Ctrl+Shift+Tab — search mode reverse
-let HK_QUICK_FORWARD: UInt32 = 3    // Opt+Tab — quick mode forward
-let HK_QUICK_REVERSE: UInt32 = 4    // Opt+Shift+Tab — quick mode reverse
+let HK_FORWARD: UInt32 = 1          // Opt+Tab — search mode forward
+let HK_REVERSE: UInt32 = 2          // Opt+Shift+Tab — search mode reverse
+let HK_QUICK_FORWARD: UInt32 = 3    // Cmd+Tab — quick mode forward
+let HK_QUICK_REVERSE: UInt32 = 4    // Cmd+Shift+Tab — quick mode reverse
 let DISPLAY_LIMIT = 12
 
 // TODO: full-text search over window *contents*. Approach: walk each window's
