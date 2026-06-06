@@ -1,15 +1,15 @@
 #!/bin/bash
-# Create a self-signed code-signing identity called "Hooka Dev" so the built
+# Create a self-signed code-signing identity called "Switcharoo Dev" so the built
 # binary has a stable designated signing requirement across rebuilds. Without
 # this, every rebuild generates a new cdhash and macOS silently invalidates
 # the Accessibility grant. With a stable signing identity, TCC matches the
 # requirement string instead, and the AX grant survives rebuilds.
 #
-# To remove the identity later: security delete-identity -c "Hooka Dev" \
+# To remove the identity later: security delete-identity -c "Switcharoo Dev" \
 #                                   ~/Library/Keychains/login.keychain-db
 set -euo pipefail
 
-IDENTITY="Hooka Dev"
+IDENTITY="Switcharoo Dev"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
 if security find-identity -p codesigning -v "$KEYCHAIN" 2>/dev/null \
@@ -51,7 +51,7 @@ OPENSSL=/usr/bin/openssl
 # Non-empty password is required — macOS's `security import` rejects empty
 # PKCS12 passwords. The password only guards the .p12 file in flight; once
 # imported, the keychain stores the key with its own protection.
-P12_PASS="hooka"
+P12_PASS="switcharoo"
 
 "$OPENSSL" pkcs12 -export \
   -inkey "$TMP/key.pem" -in "$TMP/cert.pem" \

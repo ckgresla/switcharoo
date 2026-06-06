@@ -27,11 +27,11 @@ private let axGetWindow: AXGetWindowFn? = {
 }()
 
 // MARK: - Debug log -----------------------------------------------------------
-// Writes to /tmp/hooka.log so we can diagnose issues without running from a
-// terminal. Inspect with: tail -f /tmp/hooka.log
-func hookaLog(_ s: String) {
+// Writes to /tmp/switcharoo.log so we can diagnose issues without running from a
+// terminal. Inspect with: tail -f /tmp/switcharoo.log
+func switcharooLog(_ s: String) {
     let line = "[\(Date())] \(s)\n"
-    let path = "/tmp/hooka.log"
+    let path = "/tmp/switcharoo.log"
     if !FileManager.default.fileExists(atPath: path) {
         try? "".write(toFile: path, atomically: false, encoding: .utf8)
     }
@@ -63,7 +63,7 @@ private func isSystemHelperPath(_ path: String) -> Bool {
 }
 
 func listWindows() -> [WindowRecord] {
-    hookaLog("listWindows: AX trusted=\(AXIsProcessTrusted()), axGetWindow=\(axGetWindow != nil)")
+    switcharooLog("listWindows: AX trusted=\(AXIsProcessTrusted()), axGetWindow=\(axGetWindow != nil)")
     // CGWindowList only returns true front-to-back z-order when
     // .optionOnScreenOnly is set. Without it, you get creation order — same
     // sequence every time, which kills per-window MRU. We do two queries:
@@ -532,7 +532,7 @@ final class SwitcherPanel: NSPanel {
 // MARK: - Config ---------------------------------------------------------------
 // Live-readable knobs backed by UserDefaults. The Preferences window writes
 // to the same keys.
-enum HookaConfig {
+enum SwitcharooConfig {
     /// Skip the dismissal fade-out — panel disappears instantly.
     static var fastMode: Bool { UserDefaults.standard.bool(forKey: "fastMode") }
     /// Duration of the dismissal fade when fastMode is off.
@@ -551,7 +551,7 @@ final class PreferencesController: NSObject {
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
         super.init()
-        window.title = "Hooka Preferences"
+        window.title = "Switcharoo Preferences"
         window.isReleasedWhenClosed = false
         window.contentView = makeContent()
         window.center()
@@ -595,25 +595,25 @@ final class PreferencesController: NSObject {
 
 // MARK: - Hotkey plumbing ------------------------------------------------------
 extension Notification.Name {
-    static let hookaHotkey = Notification.Name("hookaHotkey")
+    static let switcharooHotkey = Notification.Name("switcharooHotkey")
 }
 
 /// Global Cmd+Tab interceptor. Carbon's RegisterEventHotKey can't claim
 /// Cmd+Tab — the system app switcher consumes it first. CGEventTap at the
 /// session level sees the keyDown *before* the system does and can swallow
 /// it. Requires Accessibility permission (which we already require).
-private var hookaEventTap: CFMachPort?
+private var switcharooEventTap: CFMachPort?
 
 func installCmdTabTap() {
     guard AXIsProcessTrusted() else {
-        hookaLog("CGEventTap: AX not trusted; Cmd+Tab interception disabled")
+        switcharooLog("CGEventTap: AX not trusted; Cmd+Tab interception disabled")
         return
     }
     let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
     let callback: CGEventTapCallBack = { _, type, event, _ in
         // macOS can disable the tap if our callback is too slow; just re-enable.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = hookaEventTap {
+            if let tap = switcharooEventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
             return Unmanaged.passUnretained(event)
@@ -628,7 +628,7 @@ func installCmdTabTap() {
         let id: UInt32 = shift ? HK_QUICK_REVERSE : HK_QUICK_FORWARD
         DispatchQueue.main.async {
             NotificationCenter.default.post(
-                name: .hookaHotkey, object: nil, userInfo: ["id": id])
+                name: .switcharooHotkey, object: nil, userInfo: ["id": id])
         }
         return nil   // swallow — system app switcher never sees this
     }
@@ -640,14 +640,14 @@ func installCmdTabTap() {
         callback: callback,
         userInfo: nil)
     else {
-        hookaLog("CGEvent.tapCreate failed")
+        switcharooLog("CGEvent.tapCreate failed")
         return
     }
-    hookaEventTap = tap
+    switcharooEventTap = tap
     let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
     CGEvent.tapEnable(tap: tap, enable: true)
-    hookaLog("CGEventTap installed — Cmd+Tab now opens Hooka")
+    switcharooLog("CGEventTap installed — Cmd+Tab now opens Switcharoo")
 }
 
 let HK_FORWARD: UInt32 = 1          // Opt+Ctrl+Tab — search mode forward
@@ -691,11 +691,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     /// even though macOS shifts focus to the next .regular app.
     private var ignoreResignKeyUntil: TimeInterval = 0
 
-    /// External invocation: `open "hooka://show"` or `hooka://quick`. Lets
+    /// External invocation: `open "switcharoo://show"` or `switcharoo://quick`. Lets
     /// other tools (Raycast Quicklinks, Alfred, BTT, shell scripts) trigger
     /// the panel without owning a hotkey.
     func application(_ sender: NSApplication, open urls: [URL]) {
-        for url in urls where url.scheme == "hooka" {
+        for url in urls where url.scheme == "switcharoo" {
             switch url.host {
             case "show":  show(startReversed: false, quick: false)
             case "quick": show(startReversed: false, quick: true)
@@ -715,7 +715,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         installCmdTabTap()
 
         NotificationCenter.default.addObserver(
-            forName: .hookaHotkey, object: nil, queue: .main
+            forName: .switcharooHotkey, object: nil, queue: .main
         ) { [weak self] n in
             self?.onHotkey(n)
         }
@@ -772,7 +772,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         appMenu.addItem(NSMenuItem.separator())
         // Cmd+Q: when the panel is up, quit the highlighted app (canonical
         // switcher behavior — matches Cmd+M and Cmd+H). When the panel is
-        // hidden, quit Hooka itself.
+        // hidden, quit Switcharoo itself.
         let quit = NSMenuItem(title: "Quit",
                               action: #selector(handleQuit(_:)),
                               keyEquivalent: "q")
@@ -809,7 +809,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         hideItem.target = self
         winMenu.addItem(hideItem)
         // Cmd+Opt+Q — same key as the system Force Quit dialog. Acts on the
-        // highlighted app's process, not Hooka itself.
+        // highlighted app's process, not Switcharoo itself.
         let forceQuit = NSMenuItem(title: "Force Quit Highlighted App",
                                    action: #selector(forceQuitHighlighted(_:)),
                                    keyEquivalent: "q")
@@ -910,9 +910,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                 try svc.register()
             }
             sender.state = (svc.status == .enabled) ? .on : .off
-            hookaLog("Launch at Login → \(svc.status == .enabled ? "enabled" : "disabled")")
+            switcharooLog("Launch at Login → \(svc.status == .enabled ? "enabled" : "disabled")")
         } catch {
-            hookaLog("toggleLaunchAtLogin failed: \(error)")
+            switcharooLog("toggleLaunchAtLogin failed: \(error)")
         }
     }
 
@@ -1017,7 +1017,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let id = (n.userInfo?["id"] as? UInt32) ?? HK_FORWARD
         let quick = (id == HK_QUICK_FORWARD || id == HK_QUICK_REVERSE)
         let reverse = (id == HK_REVERSE || id == HK_QUICK_REVERSE)
-        hookaLog("onHotkey id=\(id) quick=\(quick) reverse=\(reverse) wasVisible=\(panel.isVisible)")
+        switcharooLog("onHotkey id=\(id) quick=\(quick) reverse=\(reverse) wasVisible=\(panel.isVisible)")
         if !panel.isVisible {
             show(startReversed: reverse, quick: quick)
         } else {
@@ -1149,13 +1149,13 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     /// Panel dismissal. In fast mode this is instant; otherwise a quick fade.
     func dismissPanel() {
         stopLiveRefresh()
-        if HookaConfig.fastMode {
+        if SwitcharooConfig.fastMode {
             panel.orderOut(nil)
             return
         }
         isDismissing = true
         NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = HookaConfig.dismissDuration
+            ctx.duration = SwitcharooConfig.dismissDuration
             panel.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             guard let self else { return }
@@ -1255,7 +1255,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func installHotkeys() {
-        let sig: OSType = 0x484F4F4B // 'HOOK'
+        let sig: OSType = 0x5357524F // 'SWRO'
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(
@@ -1269,7 +1269,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                 if r == noErr {
                     DispatchQueue.main.async {
                         NotificationCenter.default.post(
-                            name: .hookaHotkey, object: nil,
+                            name: .switcharooHotkey, object: nil,
                             userInfo: ["id": hkid.id])
                     }
                 }
