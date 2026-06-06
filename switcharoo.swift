@@ -318,17 +318,27 @@ final class SwitcherView: NSView {
         // ignores the field's `alignment` property when a placeholderAttributed
         // String is set).
         searchField.alignment = .left
+        refreshThemeColors()
+        addSubview(searchField)
+        layoutSearchField()
+    }
+
+    /// Re-resolve theme-dependent colors on the search field. These are baked
+    /// into attributed strings / properties rather than being dynamic NSColors,
+    /// so a system appearance switch after launch would otherwise leave e.g.
+    /// a light-gray placeholder invisible on the dark panel. Called on every
+    /// show().
+    func refreshThemeColors() {
+        searchField.textColor = Theme.fg
         let centerPara = NSMutableParagraphStyle()
         centerPara.alignment = .center
         searchField.placeholderAttributedString = NSAttributedString(
-            string: "Where to?",
+            string: "switcharoo",
             attributes: [
                 .foregroundColor: Theme.muted,
                 .font: NSFont.systemFont(ofSize: searchFontSize, weight: .regular),
                 .paragraphStyle: centerPara,
             ])
-        addSubview(searchField)
-        layoutSearchField()
     }
 
     private func layoutSearchField() {
@@ -722,12 +732,15 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     /// External invocation: `open "switcharoo://show"` or `switcharoo://quick`. Lets
     /// other tools (Raycast Quicklinks, Alfred, BTT, shell scripts) trigger
-    /// the panel without owning a hotkey.
+    /// the panel without owning a hotkey. `switcharoo://snap` shows the panel
+    /// and renders it to /tmp/switcharoo-ui.png — self-rendering needs no
+    /// Screen Recording permission, handy for README screenshots.
     func application(_ sender: NSApplication, open urls: [URL]) {
         for url in urls where url.scheme == "switcharoo" {
             switch url.host {
             case "show":  show(startReversed: false, quick: false)
             case "quick": show(startReversed: false, quick: true)
+            case "snap":  snapPanel()
             default:      break
             }
         }
@@ -1057,6 +1070,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func show(startReversed: Bool, quick: Bool = false) {
         quickMode = quick
         view.quickMode = quick
+        view.refreshThemeColors()
 
         let raw = listWindows().filter { !terminatingPids.contains($0.pid) }
         allRows = sortDismissedToBottom(raw)
@@ -1208,6 +1222,22 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     func cancel() {
         dismissPanel()
         NSApp.hide(nil)
+    }
+
+    /// Show the panel, then render its content view to /tmp/switcharoo-ui.png.
+    /// Self-rendering (cacheDisplay) needs no Screen Recording permission.
+    /// The 0.6s delay lets the live-title pass and first draw settle.
+    func snapPanel() {
+        show(startReversed: false, quick: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self,
+                  let rep = self.view.bitmapImageRepForCachingDisplay(in: self.view.bounds)
+            else { return }
+            self.view.cacheDisplay(in: self.view.bounds, to: rep)
+            guard let data = rep.representation(using: .png, properties: [:]) else { return }
+            try? data.write(to: URL(fileURLWithPath: "/tmp/switcharoo-ui.png"))
+            switcharooLog("snap → /tmp/switcharoo-ui.png (\(data.count) bytes)")
+        }
     }
 
     func applyQuery(_ q: String) {
