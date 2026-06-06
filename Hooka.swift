@@ -682,6 +682,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     /// sunk to the bottom of the listing — most-recently-dismissed at the
     /// very bottom, since they're the least likely target on the next press.
     var dismissedWindowIDs: [CGWindowID] = []
+    /// Pids whose terminate() / forceTerminate() we just called. Filtered out
+    /// of the row list optimistically so the dying app disappears instantly,
+    /// without waiting for macOS to actually kill the process.
+    private var terminatingPids: Set<pid_t> = []
     /// Mach-time deadline — ignore panel-resign-key dismissals until this
     /// passes. Set after hide/minimize/forceQuit so the panel stays open
     /// even though macOS shifts focus to the next .regular app.
@@ -714,6 +718,19 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             forName: .hookaHotkey, object: nil, queue: .main
         ) { [weak self] n in
             self?.onHotkey(n)
+        }
+
+        // Clean up terminatingPids when the OS confirms the app actually died,
+        // and re-render so the panel is up-to-date instantly.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] n in
+            guard let self,
+                  let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            else { return }
+            self.terminatingPids.remove(app.processIdentifier)
+            if self.panel.isVisible { self.refresh() }
         }
 
         // In quick mode, releasing Command commits the current selection —
@@ -864,11 +881,23 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     @objc func handleQuit(_ sender: Any?) {
         if panel.isVisible, let r = selectedRecord() {
-            hookaLog("handleQuit: terminating highlighted pid=\(r.pid)")
+            markTerminating(r.pid)
             _ = NSRunningApplication(processIdentifier: r.pid)?.terminate()
+            keepPanelOpen()
             refresh()
         } else {
             NSApplication.shared.terminate(nil)
+        }
+    }
+
+    /// Optimistically treat a pid as gone. If the actual terminate ends up
+    /// refusing (e.g. unsaved-work prompt), we clear the mark after a few
+    /// seconds so the app reappears in the list.
+    private func markTerminating(_ pid: pid_t) {
+        terminatingPids.insert(pid)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            self?.terminatingPids.remove(pid)
+            if self?.panel.isVisible == true { self?.refresh() }
         }
     }
 
@@ -900,6 +929,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     @objc func forceQuitHighlighted(_ sender: Any?) {
         guard let r = selectedRecord() else { return }
+        markTerminating(r.pid)
         _ = NSRunningApplication(processIdentifier: r.pid)?.forceTerminate()
         keepPanelOpen()
         refresh()
@@ -920,7 +950,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     /// Re-fetch windows and re-apply the current query. Used after a window
     /// management action so the list reflects the new state.
     private func refresh() {
-        allRows = sortDismissedToBottom(listWindows())
+        let raw = listWindows().filter { !terminatingPids.contains($0.pid) }
+        allRows = sortDismissedToBottom(raw)
         let q = view.searchField.stringValue
         let filtered = filterWindows(allRows, query: q)
         rows = Array(filtered.prefix(DISPLAY_LIMIT))
@@ -998,7 +1029,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         quickMode = quick
         view.quickMode = quick
 
-        allRows = sortDismissedToBottom(listWindows())
+        let raw = listWindows().filter { !terminatingPids.contains($0.pid) }
+        allRows = sortDismissedToBottom(raw)
         rows = Array(allRows.prefix(DISPLAY_LIMIT))
         view.searchField.stringValue = ""
         view.query = ""
