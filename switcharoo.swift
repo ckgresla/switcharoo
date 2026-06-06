@@ -26,6 +26,15 @@ private let axGetWindow: AXGetWindowFn? = {
     return nil
 }()
 
+/// Per-app AX element with a short messaging timeout. The default AX timeout
+/// is ~6 seconds per request; one hung or busy app would otherwise stall
+/// every listWindows() / title poll for seconds at a time.
+func axApp(_ pid: pid_t) -> AXUIElement {
+    let elem = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(elem, 0.25)
+    return elem
+}
+
 // MARK: - Debug log -----------------------------------------------------------
 // Writes to /tmp/switcharoo.log so we can diagnose issues without running from a
 // terminal. Inspect with: tail -f /tmp/switcharoo.log
@@ -98,7 +107,7 @@ func listWindows() -> [WindowRecord] {
         if fetchedPids.contains(pid) { return }
         fetchedPids.insert(pid)
         guard let axGet = axGetWindow else { return }
-        let appElem = AXUIElementCreateApplication(pid)
+        let appElem = axApp(pid)
         var raw: AnyObject?
         guard AXUIElementCopyAttributeValue(appElem, kAXWindowsAttribute as CFString, &raw) == .success,
               let axWindows = raw as? [AXUIElement], !axWindows.isEmpty
@@ -167,7 +176,7 @@ func listWindows() -> [WindowRecord] {
 
 // MARK: - Raise a specific window ----------------------------------------------
 func raise(_ w: WindowRecord) {
-    let app = AXUIElementCreateApplication(w.pid)
+    let app = axApp(w.pid)
     var raw: AnyObject?
     if AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &raw) == .success,
        let axWindows = raw as? [AXUIElement],
@@ -551,7 +560,7 @@ final class PreferencesController: NSObject {
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
         super.init()
-        window.title = "Switcharoo Preferences"
+        window.title = "switcharoo preferences"
         window.isReleasedWhenClosed = false
         window.contentView = makeContent()
         window.center()
@@ -572,7 +581,7 @@ final class PreferencesController: NSObject {
 
         for line in [
             "",
-            "Hotkey:  Opt+Ctrl+Tab forward · Opt+Ctrl+Shift+Tab reverse",
+            "Hotkey:  Cmd+Tab quick mode · Opt+Tab search mode · +Shift reverses",
             "Filter:   type to filter · matching characters underlined",
             "Move:    Up/Down or Tab/Shift+Tab to cycle",
             "Commit: Enter to switch · Esc to cancel",
@@ -632,22 +641,35 @@ func installCmdTabTap() {
         }
         return nil   // swallow — system app switcher never sees this
     }
-    guard let tap = CGEvent.tapCreate(
-        tap: .cgSessionEventTap,
-        place: .headInsertEventTap,
-        options: .defaultTap,
-        eventsOfInterest: mask,
-        callback: callback,
-        userInfo: nil)
-    else {
-        switcharooLog("CGEvent.tapCreate failed")
-        return
+    // The tap runs on its own thread with its own runloop. A session-level
+    // tap sees EVERY keyDown in the login session; if its runloop lived on
+    // the main thread, any main-thread stall (e.g. a slow AX call into a
+    // busy app) would stall keyboard delivery system-wide until macOS
+    // disables the tap — which the callback above then re-enables, freezing
+    // input in waves. A dedicated thread keeps event delivery independent
+    // of whatever the app is doing.
+    let thread = Thread {
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: callback,
+            userInfo: nil)
+        else {
+            switcharooLog("CGEvent.tapCreate failed")
+            return
+        }
+        switcharooEventTap = tap
+        let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), src, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        switcharooLog("CGEventTap installed — Cmd+Tab now opens switcharoo")
+        CFRunLoopRun()
     }
-    switcharooEventTap = tap
-    let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-    CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
-    CGEvent.tapEnable(tap: tap, enable: true)
-    switcharooLog("CGEventTap installed — Cmd+Tab now opens Switcharoo")
+    thread.name = "switcharoo-eventtap"
+    thread.qualityOfService = .userInteractive
+    thread.start()
 }
 
 let HK_FORWARD: UInt32 = 1          // Opt+Ctrl+Tab — search mode forward
@@ -772,7 +794,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         appMenu.addItem(NSMenuItem.separator())
         // Cmd+Q: when the panel is up, quit the highlighted app (canonical
         // switcher behavior — matches Cmd+M and Cmd+H). When the panel is
-        // hidden, quit Switcharoo itself.
+        // hidden, quit switcharoo itself.
         let quit = NSMenuItem(title: "Quit",
                               action: #selector(handleQuit(_:)),
                               keyEquivalent: "q")
@@ -809,7 +831,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         hideItem.target = self
         winMenu.addItem(hideItem)
         // Cmd+Opt+Q — same key as the system Force Quit dialog. Acts on the
-        // highlighted app's process, not Switcharoo itself.
+        // highlighted app's process, not switcharoo itself.
         let forceQuit = NSMenuItem(title: "Force Quit Highlighted App",
                                    action: #selector(forceQuitHighlighted(_:)),
                                    keyEquivalent: "q")
@@ -824,7 +846,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // MARK: Window management actions ------------------------------------------
 
     private func axWindowFor(_ r: WindowRecord) -> AXUIElement? {
-        let app = AXUIElementCreateApplication(r.pid)
+        let app = axApp(r.pid)
         var raw: AnyObject?
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &raw) == .success,
               let wins = raw as? [AXUIElement],
@@ -1086,7 +1108,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         // Group by pid so we only do one kAXWindowsAttribute fetch per app.
         let pids = Set(rows.map(\.pid))
         for pid in pids {
-            let appElem = AXUIElementCreateApplication(pid)
+            let appElem = axApp(pid)
             var raw: AnyObject?
             guard AXUIElementCopyAttributeValue(appElem, kAXWindowsAttribute as CFString, &raw) == .success,
                   let axWindows = raw as? [AXUIElement] else { continue }
