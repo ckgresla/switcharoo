@@ -593,7 +593,7 @@ final class PreferencesController: NSObject {
             "",
             "Hotkey:  Cmd+Tab quick mode · Opt+Tab search mode · +Shift reverses",
             "Filter:   type to filter · matching characters underlined",
-            "Move:    Up/Down or Tab/Shift+Tab to cycle",
+            "Move:    Up/Down · Ctrl+K/Ctrl+J · Tab/Shift+Tab to cycle",
             "Commit: Enter to switch · Esc to cancel",
             "Actions: Cmd+M minimize highlighted · Cmd+H hide highlighted app",
         ] {
@@ -711,6 +711,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var isDismissing: Bool = false
     var quickMode: Bool = false       // true → "release Cmd to commit" flow
     var modifierMonitor: Any?
+    var keyMonitor: Any?
     /// Polls AX titles while the panel is visible so e.g. Spotify track
     /// changes appear live in the row without dismissing/reopening.
     var liveRefreshTimer: Timer?
@@ -787,6 +788,21 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             return ev
         }
 
+        // Vim-style Ctrl+J / Ctrl+K to move down / up. Handled here rather
+        // than via the text-field delegate so it works identically in search
+        // mode (field editor has focus) and quick mode (panel has focus).
+        // Returning nil swallows the event so Ctrl+J doesn't insert a newline
+        // into the search field.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] ev in
+            guard let self, self.panel.isVisible,
+                  ev.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control
+            else { return ev }
+            switch ev.charactersIgnoringModifiers {
+            case "j": self.cycle(reverse: false); return nil
+            case "k": self.cycle(reverse: true);  return nil
+            default:  return ev
+            }
+        }
     }
 
     func installMenu() {

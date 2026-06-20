@@ -16,7 +16,7 @@ MRU-ordered; titles update live while the panel is open.
 | --- | --- |
 | `Cmd+Tab` / `Cmd+Shift+Tab` | quick mode — release Cmd to switch |
 | `Opt+Tab` / `Opt+Shift+Tab` | search mode — type to filter |
-| `Up`/`Down`/`Tab` | move selection |
+| `Up`/`Down` · `Ctrl+K`/`Ctrl+J` · `Tab` | move selection |
 | `Enter` / `Esc` | switch / cancel |
 | `Cmd+M` · `Cmd+H` · `Cmd+Q` · `Cmd+Opt+Q` | minimize · hide · quit · force-quit the highlighted app |
 
