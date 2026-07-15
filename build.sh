@@ -1,5 +1,7 @@
 #!/bin/bash
-# Build switcharoo.app — single-file Swift binary in a minimal .app bundle.
+# Build and install switcharoo.app — single-file Swift binary in a minimal
+# .app bundle, installed to /Applications so login items and Launch Services
+# point at a stable, repo-independent path.
 #
 # If the self-signed "Switcharoo Dev" identity is present, we sign with it so the
 # Accessibility grant survives rebuilds. Otherwise we fall back to ad-hoc.
@@ -7,10 +9,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP="switcharoo.app"
+APP="/Applications/switcharoo.app"
 IDENTITY="Switcharoo Dev"
 
 rm -rf "$APP"
+# Drop the old repo-local bundle so Launch Services doesn't keep a second
+# registration of the switcharoo:// scheme pointing into the repo.
+rm -rf switcharoo.app
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"

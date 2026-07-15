@@ -742,6 +742,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             case "show":  show(startReversed: false, quick: false)
             case "quick": show(startReversed: false, quick: true)
             case "snap":  snapPanel()
+            case "login-on":  setLaunchAtLogin(true)
+            case "login-off": setLaunchAtLogin(false)
             default:      break
             }
         }
@@ -960,17 +962,21 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     @objc func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        setLaunchAtLogin(SMAppService.mainApp.status != .enabled)
+        sender.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+    }
+
+    func setLaunchAtLogin(_ on: Bool) {
         let svc = SMAppService.mainApp
         do {
-            if svc.status == .enabled {
+            if on {
+                if svc.status != .enabled { try svc.register() }
+            } else if svc.status == .enabled {
                 try svc.unregister()
-            } else {
-                try svc.register()
             }
-            sender.state = (svc.status == .enabled) ? .on : .off
             switcharooLog("Launch at Login → \(svc.status == .enabled ? "enabled" : "disabled")")
         } catch {
-            switcharooLog("toggleLaunchAtLogin failed: \(error)")
+            switcharooLog("setLaunchAtLogin(\(on)) failed: \(error)")
         }
     }
 

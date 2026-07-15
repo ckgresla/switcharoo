@@ -21,14 +21,15 @@ MRU-ordered; titles update live while the panel is open.
 | `Cmd+M` · `Cmd+H` · `Cmd+Q` · `Cmd+Opt+Q` | minimize · hide · quit · force-quit the highlighted app |
 
 URL scheme for Raycast/Alfred/scripts: `switcharoo://show`, `switcharoo://quick`,
-`switcharoo://snap` (renders the panel to `/tmp/switcharoo-ui.png`).
+`switcharoo://snap` (renders the panel to `/tmp/switcharoo-ui.png`),
+`switcharoo://login-on` / `switcharoo://login-off` (launch at login).
 
 ## build
 
 ```sh
 ./setup-dev-cert.sh   # once — stable self-signed identity, so the
                       # Accessibility grant survives rebuilds
-./build.sh            # compile, sign, relaunch
+./build.sh            # compile, sign, install to /Applications, relaunch
 ```
 
 Requires macOS 14+ and the Accessibility permission (prompted on first
