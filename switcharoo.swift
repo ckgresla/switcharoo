@@ -51,6 +51,57 @@ func switcharooLog(_ s: String) {
     }
 }
 
+// MARK: - Cross-Space activation MRU -------------------------------------------
+// CGWindowList's z-order is only usable for the *current* Space:
+// .optionOnScreenOnly is scoped to the active Space, not to "not covered up".
+// On a normal Space that's fine — everything the user can switch to is right
+// there, correctly z-ordered. Inside a fullscreen Space it collapses: exactly
+// one window (the fullscreen app's own) carries usable MRU and every other
+// window in the system falls into the unordered bucket, so the switcher loses
+// its ordering precisely when you're in a fullscreen app. CoreGraphics has no
+// cross-Space MRU to recover, so we track app activation ourselves and use it
+// to rank anything that isn't on the current Space.
+final class ActivationMRU {
+    static let shared = ActivationMRU()
+    /// Most-recently-activated first.
+    private var pids: [pid_t] = []
+    private let selfPid = ProcessInfo.processInfo.processIdentifier
+
+    func start() {
+        // Seed so ordering is sane before the user has switched at all. Only
+        // the current frontmost app is known for certain; the rest self-corrects
+        // as soon as the user starts switching.
+        if let front = NSWorkspace.shared.frontmostApplication {
+            touch(front.processIdentifier)
+        }
+        for a in NSWorkspace.shared.runningApplications
+        where a.activationPolicy == .regular {
+            let pid = a.processIdentifier
+            if pid != selfPid, !pids.contains(pid) { pids.append(pid) }
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] n in
+            guard let app = n.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication else { return }
+            self?.touch(app.processIdentifier)
+        }
+    }
+
+    /// Move a pid to the front of the MRU. Our own pid is never recorded —
+    /// showing the panel activates switcharoo, and that must not displace the
+    /// app the user was actually in.
+    func touch(_ pid: pid_t) {
+        guard pid != selfPid else { return }
+        pids.removeAll { $0 == pid }
+        pids.insert(pid, at: 0)
+    }
+
+    /// Lower is more recent. Unknown pids sort last.
+    func rank(_ pid: pid_t) -> Int { pids.firstIndex(of: pid) ?? Int.max }
+}
+
 // MARK: - Window enumeration ---------------------------------------------------
 struct WindowRecord {
     let windowID: CGWindowID
@@ -76,10 +127,13 @@ func listWindows() -> [WindowRecord] {
     // CGWindowList only returns true front-to-back z-order when
     // .optionOnScreenOnly is set. Without it, you get creation order — same
     // sequence every time, which kills per-window MRU. We do two queries:
-    //   1. on-screen windows, z-ordered (MRU for what the user can see)
-    //   2. all windows, used only to recover minimized/hidden windows that
-    //      are valid switch targets but aren't in #1. Those are appended
-    //      after the visible ones in whatever order CG gave them.
+    //   1. on-screen windows, z-ordered (MRU, but ONLY for the current Space —
+    //      .optionOnScreenOnly is Space-scoped, so in a fullscreen Space this
+    //      is just the fullscreen app itself)
+    //   2. all windows, to recover everything not in #1: minimized/hidden
+    //      windows, and — when the user is in a fullscreen Space — literally
+    //      every other app. CG hands these back in creation order, which is
+    //      useless for switching, so we re-rank them by our own activation MRU.
     let onScreenInfos = (CGWindowListCopyWindowInfo(
         [.optionOnScreenOnly, .excludeDesktopElements],
         kCGNullWindowID) as? [[String: Any]]) ?? []
@@ -89,11 +143,24 @@ func listWindows() -> [WindowRecord] {
     let allInfos = (CGWindowListCopyWindowInfo(
         [.excludeDesktopElements],
         kCGNullWindowID) as? [[String: Any]]) ?? []
-    let offScreenInfos = allInfos.filter {
-        guard let id = $0[kCGWindowNumber as String] as? CGWindowID
-        else { return false }
-        return !onScreenIDs.contains(id)
-    }
+    // Decorated with the original index so equal ranks keep CG's order —
+    // Swift's sort is not stable on its own.
+    let offScreenInfos = allInfos
+        .filter {
+            guard let id = $0[kCGWindowNumber as String] as? CGWindowID
+            else { return false }
+            return !onScreenIDs.contains(id)
+        }
+        .enumerated()
+        .sorted { a, b in
+            let ra = ActivationMRU.shared.rank(
+                a.element[kCGWindowOwnerPID as String] as? pid_t ?? 0)
+            let rb = ActivationMRU.shared.rank(
+                b.element[kCGWindowOwnerPID as String] as? pid_t ?? 0)
+            if ra != rb { return ra < rb }
+            return a.offset < b.offset
+        }
+        .map(\.element)
     let infos = onScreenInfos + offScreenInfos
 
     // CG window titles require Screen Recording permission and otherwise come
@@ -176,8 +243,10 @@ func listWindows() -> [WindowRecord] {
 
 // MARK: - Raise a specific window ----------------------------------------------
 func raise(_ w: WindowRecord) {
+    let t0 = CACurrentMediaTime()
     let app = axApp(w.pid)
     var raw: AnyObject?
+    var axMatched = false
     if AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &raw) == .success,
        let axWindows = raw as? [AXUIElement],
        let axGet = axGetWindow
@@ -187,11 +256,19 @@ func raise(_ w: WindowRecord) {
             if axGet(axWin, &wid) == .success, wid == w.windowID {
                 AXUIElementPerformAction(axWin, kAXRaiseAction as CFString)
                 _ = AXUIElementSetAttributeValue(axWin, kAXMainAttribute as CFString, kCFBooleanTrue)
+                axMatched = true
                 break
             }
         }
     }
-    NSRunningApplication(processIdentifier: w.pid)?.activate()
+    let axMs = (CACurrentMediaTime() - t0) * 1000
+    // Modern cooperative activation: this is a *request*, and macOS can refuse
+    // it. Capture the return value so a refusal is visible in the log.
+    let activated = NSRunningApplication(processIdentifier: w.pid)?.activate() ?? false
+    switcharooLog(String(
+        format: "raise: %@ wid=%u pid=%d axMatched=%@ activate()=%@ ax=%.0fms",
+        w.appName, w.windowID, w.pid,
+        axMatched ? "Y" : "**N**", activated ? "Y" : "**N**", axMs))
 }
 
 // MARK: - Filtering ------------------------------------------------------------
@@ -753,6 +830,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         // Default to fast mode on — the dismissal fade is the only animation,
         // and a switcher should feel instant.
         UserDefaults.standard.register(defaults: ["fastMode": true])
+        ActivationMRU.shared.start()
         promptAX()
         installMenu()
         buildPanel()
@@ -1072,6 +1150,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                     return
                 }
                 if NSApp.isActive { return }
+                switcharooLog("resignKey: auto-dismissing panel — frontmost=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")")
                 self.dismissPanel()
             }
         }
@@ -1109,11 +1188,28 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         view.selected = selected
         sizeAndPosition()
         view.needsDisplay = true
+        let sourceApp = NSWorkspace.shared.frontmostApplication
         NSApp.activate()
         panel.makeKeyAndOrderFront(nil)
         // In search mode, focus the text field. In quick mode, don't — there's
         // no field to type into, and panel itself receives Tab via the hotkey.
         if !quick { panel.makeFirstResponder(view.searchField) }
+        switcharooLog("show: quick=\(quick) rows=\(rows.count) selected=\(selected) sourceApp=\(sourceApp?.localizedName ?? "?") isActive=\(NSApp.isActive) panelKey=\(panel.isKeyWindow)")
+        // The ordering itself is the evidence for MRU problems: index 1 should
+        // be the app you were just in. Marked with * is the preselected row.
+        switcharooLog("show rows: " + rows.enumerated().map {
+            "\($0.offset)\($0.offset == selected ? "*" : "")=\($0.element.appName)#\($0.element.windowID)"
+        }.joined(separator: " "))
+        // Cooperative activation is asynchronous and can be silently denied:
+        // NSApp.isActive/panelKey can both read true while the WindowServer
+        // still has the previous app frontmost, which means keystrokes never
+        // reach us. Sample the settled state to catch that split-brain.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            let f = NSWorkspace.shared.frontmostApplication
+            let ours = f?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+            switcharooLog("show+150ms: frontmost=\(f?.localizedName ?? "?") panelOwnsFocus=\(ours ? "Y" : "**N**") isActive=\(NSApp.isActive) panelKey=\(self.panel.isKeyWindow) panelVisible=\(self.panel.isVisible)")
+        }
 
         // Race: with a fast tap (press + release Cmd+Tab in <1 frame), the
         // user can release Cmd between the CGEventTap intercept and this
@@ -1232,16 +1328,28 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     func commit() {
         let pick = (selected < rows.count) ? rows[selected] : nil
+        let pickDesc = pick.map { "\($0.appName) wid=\($0.windowID) \"\($0.title)\"" }
+            ?? "**none**"
+        switcharooLog("commit: selected=\(selected)/\(rows.count) pick=\(pickDesc) query=\"\(view.searchField.stringValue)\" frontmost=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?") isActive=\(NSApp.isActive) panelKey=\(panel.isKeyWindow)")
         dismissPanel()
         if let pick {
             // Picking a previously-dismissed window cancels its "dismissed"
             // status so it returns to normal MRU position next time.
             dismissedWindowIDs.removeAll(where: { $0 == pick.windowID })
             raise(pick)
+            // Did the target actually end up frontmost? This is the line to
+            // look at when a switch "didn't take".
+            let pid = pick.pid, name = pick.appName
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                let f = NSWorkspace.shared.frontmostApplication
+                let ok = f?.processIdentifier == pid
+                switcharooLog("commit+400ms: target=\(name) frontmost=\(f?.localizedName ?? "?") targetIsFrontmost=\(ok ? "Y" : "**N**")")
+            }
         }
     }
 
     func cancel() {
+        switcharooLog("cancel: panel cancelled (Esc / cancelOperation)")
         dismissPanel()
         NSApp.hide(nil)
     }
