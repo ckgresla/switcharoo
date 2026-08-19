@@ -51,6 +51,27 @@ func switcharooLog(_ s: String) {
     }
 }
 
+// MARK: - AX window cache ------------------------------------------------------
+// An AX request into an app that is busy, throttled by App Nap, or sitting on
+// another Space can blow past our 0.25s messaging timeout. When that happens
+// loadAXTitles() gets nothing, the pid never lands in axFunctionalPids, and the
+// AX-confirmation filter below is skipped — so the app's raw CoreGraphics
+// windows survive instead. For most apps those include untitled helper/overlay
+// windows, so the row loses its title AND ends up carrying a windowID that AX
+// doesn't recognise, which means raise() can't target it either. Reusing the
+// last good answer keeps both the title and the raisable windowID stable across
+// a transient timeout. Entries are always intersected with the live CG list
+// before use, so a cached window that has since closed can never resurrect.
+private struct AXWindowSnapshot {
+    var confirmed: Set<CGWindowID>
+    var titles: [CGWindowID: String]
+    var stamp: CFTimeInterval
+}
+private var axSnapshotByPid: [pid_t: AXWindowSnapshot] = [:]
+/// Generous: a slightly stale title is far better than a blank row, and the
+/// live-refresh timer corrects titles within 0.4s of the panel opening.
+private let axSnapshotTTL: CFTimeInterval = 600
+
 // MARK: - Cross-Space activation MRU -------------------------------------------
 // CGWindowList's z-order is only usable for the *current* Space:
 // .optionOnScreenOnly is scoped to the active Space, not to "not covered up".
@@ -170,26 +191,78 @@ func listWindows() -> [WindowRecord] {
     var axConfirmedWindowIDs = Set<CGWindowID>()   // AX agrees these are real
     var axFunctionalPids = Set<pid_t>()             // axGet works for this pid
     var fetchedPids = Set<pid_t>()
+    // Which CGWindowIDs each pid currently owns — used to validate cache hits.
+    var cgWidsByPid: [pid_t: Set<CGWindowID>] = [:]
+    for d in infos {
+        guard let pid = d[kCGWindowOwnerPID as String] as? pid_t,
+              let wid = d[kCGWindowNumber as String] as? CGWindowID else { continue }
+        cgWidsByPid[pid, default: []].insert(wid)
+    }
+
+    /// Fall back to the last good AX answer for this pid, if we have one that
+    /// is still fresh and still refers to windows CoreGraphics reports today.
+    func useCachedAX(for pid: pid_t, because reason: String) {
+        guard let snap = axSnapshotByPid[pid],
+              CACurrentMediaTime() - snap.stamp < axSnapshotTTL
+        else {
+            switcharooLog("listWindows: AX \(reason) pid=\(pid) — no usable cache; row falls back to raw CG windows (untitled, unraisable)")
+            return
+        }
+        let live = snap.confirmed.intersection(cgWidsByPid[pid] ?? [])
+        guard !live.isEmpty else {
+            switcharooLog("listWindows: AX \(reason) pid=\(pid) — cached windows all gone; row falls back to raw CG windows")
+            return
+        }
+        axFunctionalPids.insert(pid)
+        axConfirmedWindowIDs.formUnion(live)
+        for wid in live where titlesByWindowID[wid] == nil {
+            if let t = snap.titles[wid] { titlesByWindowID[wid] = t }
+        }
+        switcharooLog("listWindows: AX \(reason) pid=\(pid) — reused \(live.count) cached window(s), age=\(Int(CACurrentMediaTime() - snap.stamp))s")
+    }
+
     func loadAXTitles(for pid: pid_t) {
         if fetchedPids.contains(pid) { return }
         fetchedPids.insert(pid)
         guard let axGet = axGetWindow else { return }
         let appElem = axApp(pid)
         var raw: AnyObject?
-        guard AXUIElementCopyAttributeValue(appElem, kAXWindowsAttribute as CFString, &raw) == .success,
-              let axWindows = raw as? [AXUIElement], !axWindows.isEmpty
-        else { return }
+        let err = AXUIElementCopyAttributeValue(appElem, kAXWindowsAttribute as CFString, &raw)
+        guard err == .success, let axWindows = raw as? [AXUIElement], !axWindows.isEmpty
+        else {
+            // err -25204 (cannotComplete) is the messaging timeout.
+            useCachedAX(for: pid, because: "miss(err=\(err.rawValue))")
+            return
+        }
+        var confirmed = Set<CGWindowID>()
+        var titles: [CGWindowID: String] = [:]
         for axWin in axWindows {
             var wid: CGWindowID = 0
             guard axGet(axWin, &wid) == .success else { continue }
-            axFunctionalPids.insert(pid)
-            axConfirmedWindowIDs.insert(wid)
+            confirmed.insert(wid)
             var titleRaw: AnyObject?
             if AXUIElementCopyAttributeValue(axWin, kAXTitleAttribute as CFString, &titleRaw) == .success,
                let s = titleRaw as? String {
-                titlesByWindowID[wid] = s
+                titles[wid] = s
             }
         }
+        // AX answered but no window resolved to a CGWindowID — same blind spot.
+        guard !confirmed.isEmpty else {
+            useCachedAX(for: pid, because: "no-resolvable-windows")
+            return
+        }
+        axFunctionalPids.insert(pid)
+        axConfirmedWindowIDs.formUnion(confirmed)
+        titlesByWindowID.merge(titles) { _, new in new }
+        // Only remember titles we actually got; a window whose title fetch timed
+        // out must not overwrite a good cached title with an empty string.
+        var merged = axSnapshotByPid[pid]?.titles ?? [:]
+        for (wid, t) in titles where !t.isEmpty { merged[wid] = t }
+        for wid in confirmed where merged[wid] == nil { merged[wid] = titles[wid] ?? "" }
+        axSnapshotByPid[pid] = AXWindowSnapshot(
+            confirmed: confirmed,
+            titles: merged.filter { confirmed.contains($0.key) },
+            stamp: CACurrentMediaTime())
     }
 
     // CGWindowList returns windows in front-to-back z-order, which is itself
