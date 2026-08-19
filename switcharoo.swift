@@ -236,7 +236,17 @@ func listWindows() -> [WindowRecord] {
         }
         var confirmed = Set<CGWindowID>()
         var titles: [CGWindowID: String] = [:]
+        var sawRealWindow = false
         for axWin in axWindows {
+            // Finder reports the *desktop* in kAXWindows as an AXScrollArea: it
+            // has no CGWindowID (_AXUIElementGetWindow returns -25201) and is not
+            // something you can switch to. Filter on role rather than subrole —
+            // a browser window can legitimately be subrole AXDialog.
+            var roleRaw: AnyObject?
+            guard AXUIElementCopyAttributeValue(axWin, kAXRoleAttribute as CFString, &roleRaw) == .success,
+                  (roleRaw as? String) == kAXWindowRole
+            else { continue }
+            sawRealWindow = true
             var wid: CGWindowID = 0
             guard axGet(axWin, &wid) == .success else { continue }
             confirmed.insert(wid)
@@ -246,8 +256,20 @@ func listWindows() -> [WindowRecord] {
                 titles[wid] = s
             }
         }
-        // AX answered but no window resolved to a CGWindowID — same blind spot.
         guard !confirmed.isEmpty else {
+            if !sawRealWindow {
+                // AX answered, with content, and none of it was a window. That is
+                // a definitive "nothing here to switch to" — Finder with no
+                // browser windows open — not a failure to interrogate. Do NOT
+                // fall back to the app's leftover CG overlay windows; that
+                // fabricates an untitled row pointing at a phantom windowID that
+                // raise() can never match. Marking the pid AX-functional makes
+                // the confirmation filter below drop every one of them.
+                axFunctionalPids.insert(pid)
+                switcharooLog("listWindows: pid=\(pid) has no AX windows (only non-window elements) — no switch target, dropping its CG windows")
+                return
+            }
+            // Role said window but the ID would not resolve — genuinely blind.
             useCachedAX(for: pid, because: "no-resolvable-windows")
             return
         }
@@ -316,6 +338,8 @@ func listWindows() -> [WindowRecord] {
 
 // MARK: - Raise a specific window ----------------------------------------------
 func raise(_ w: WindowRecord) {
+    raiseGeneration += 1
+    let gen = raiseGeneration
     let t0 = CACurrentMediaTime()
     let app = axApp(w.pid)
     var raw: AnyObject?
@@ -359,6 +383,34 @@ func raise(_ w: WindowRecord) {
         activated ? "Y" : "**N**",
         forced ? (activated ? " (via forced fallback)" : " (fallback also refused)") : "",
         axMs))
+    verifyRaise(w, generation: gen, attemptsLeft: 3)
+}
+
+/// Bumped on every raise so a pending verification can tell it has been
+/// superseded — otherwise a retry could yank the user back to the app they
+/// just switched away from.
+private var raiseGeneration = 0
+
+/// Activation is a *request*, and macOS refuses it for reasons we have not been
+/// able to reproduce on demand (the one captured refusal happened while the
+/// target's window was mid-resize). Since the cause is not pinned down, don't
+/// trust the return value at all: check whether the target actually came
+/// forward and re-issue the forced activation if it did not. Bounded, and
+/// abandoned the moment a newer raise supersedes this one, so it can neither
+/// spin on an unactivatable app nor fight the user's next switch.
+private func verifyRaise(_ w: WindowRecord, generation: Int, attemptsLeft: Int) {
+    guard attemptsLeft > 0, generation == raiseGeneration else { return }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+        guard generation == raiseGeneration else { return }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier != w.pid else {
+            return
+        }
+        guard let target = NSRunningApplication(processIdentifier: w.pid),
+              !target.isTerminated else { return }
+        switcharooLog("raise: \(w.appName) still not frontmost — re-issuing forced activation (\(attemptsLeft - 1) attempt(s) left)")
+        _ = target.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        verifyRaise(w, generation: generation, attemptsLeft: attemptsLeft - 1)
+    }
 }
 
 // MARK: - Filtering ------------------------------------------------------------
