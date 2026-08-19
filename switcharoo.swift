@@ -715,16 +715,6 @@ final class SwitcherPanel: NSPanel {
     }
 }
 
-// MARK: - Config ---------------------------------------------------------------
-// Live-readable knobs backed by UserDefaults. The Preferences window writes
-// to the same keys.
-enum SwitcharooConfig {
-    /// Skip the dismissal fade-out — panel disappears instantly.
-    static var fastMode: Bool { UserDefaults.standard.bool(forKey: "fastMode") }
-    /// Duration of the dismissal fade when fastMode is off.
-    static let dismissDuration: TimeInterval = 0.10
-}
-
 // MARK: - Preferences window ---------------------------------------------------
 final class PreferencesController: NSObject {
     static let shared = PreferencesController()
@@ -750,14 +740,7 @@ final class PreferencesController: NSObject {
         stack.spacing = 12
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
 
-        let fast = NSButton(
-            checkboxWithTitle: "Fast mode (skip dismissal animation)",
-            target: self, action: #selector(toggleFast(_:)))
-        fast.state = UserDefaults.standard.bool(forKey: "fastMode") ? .on : .off
-        stack.addArrangedSubview(fast)
-
         for line in [
-            "",
             "Hotkey:  Cmd+Tab quick mode · Opt+Tab search mode · +Shift reverses",
             "Filter:   type to filter · matching characters underlined",
             "Move:    Up/Down · Ctrl+K/Ctrl+J · Tab/Shift+Tab to cycle",
@@ -767,10 +750,6 @@ final class PreferencesController: NSObject {
             stack.addArrangedSubview(NSTextField(labelWithString: line))
         }
         return stack
-    }
-
-    @objc private func toggleFast(_ sender: NSButton) {
-        UserDefaults.standard.set(sender.state == .on, forKey: "fastMode")
     }
 
     func show() {
@@ -875,7 +854,6 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var allRows: [WindowRecord] = []
     var rows: [WindowRecord] = []
     var selected: Int = 0
-    var isDismissing: Bool = false
     var quickMode: Bool = false       // true → "release Cmd to commit" flow
     var modifierMonitor: Any?
     var keyMonitor: Any?
@@ -917,9 +895,6 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        // Default to fast mode on — the dismissal fade is the only animation,
-        // and a switcher should feel instant.
-        UserDefaults.standard.register(defaults: ["fastMode": true])
         ActivationMRU.shared.start()
         promptAX()
         installMenu()
@@ -1224,10 +1199,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             forName: NSWindow.didResignKeyNotification,
             object: panel, queue: .main
         ) { [weak self] _ in
-            guard let self, !self.isDismissing, self.panel.isVisible else { return }
+            guard let self, self.panel.isVisible else { return }
             // Defer one tick so NSApp.isActive reflects the post-event state.
             DispatchQueue.main.async { [weak self] in
-                guard let self, !self.isDismissing, self.panel.isVisible else { return }
+                guard let self, self.panel.isVisible else { return }
                 // During the suppression window (right after a management
                 // action), aggressively re-steal focus so keystrokes go
                 // back to the panel, not the newly-frontmost app.
@@ -1397,23 +1372,12 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         view.needsDisplay = true
     }
 
-    /// Panel dismissal. In fast mode this is instant; otherwise a quick fade.
+    /// Panel dismissal — always immediate. A switcher that animates on the way
+    /// out is a switcher that is still on screen when you have already moved on,
+    /// so there is no fade and no preference to turn one on.
     func dismissPanel() {
         stopLiveRefresh()
-        if SwitcharooConfig.fastMode {
-            panel.orderOut(nil)
-            return
-        }
-        isDismissing = true
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = SwitcharooConfig.dismissDuration
-            panel.animator().alphaValue = 0
-        }, completionHandler: { [weak self] in
-            guard let self else { return }
-            self.panel.orderOut(nil)
-            self.panel.alphaValue = 1
-            self.isDismissing = false
-        })
+        panel.orderOut(nil)
     }
 
     func commit() {
