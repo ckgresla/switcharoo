@@ -335,13 +335,30 @@ func raise(_ w: WindowRecord) {
         }
     }
     let axMs = (CACurrentMediaTime() - t0) * 1000
-    // Modern cooperative activation: this is a *request*, and macOS can refuse
-    // it. Capture the return value so a refusal is visible in the log.
-    let activated = NSRunningApplication(processIdentifier: w.pid)?.activate() ?? false
+    // Activation is a *request* under macOS 14+ cooperative activation, and it
+    // is refused unless we are still the active app. Caught in the wild:
+    //   raise: Emacs wid=1540 axMatched=Y activate()=N  → targetIsFrontmost=N
+    // The AX raise had already matched the right window; only the app-level
+    // activation was denied, so the switch silently did nothing and the user
+    // had to invoke switcharoo a second time. commit() now raises before
+    // dismissing the panel so we still hold activation here, and if the
+    // cooperative form is still refused we fall back to the deprecated
+    // ignoringOtherApps form, which is not subject to that arbitration.
+    let target = NSRunningApplication(processIdentifier: w.pid)
+    var activated = target?.activate(options: [.activateAllWindows]) ?? false
+    var forced = false
+    if !activated {
+        forced = true
+        activated = target?.activate(
+            options: [.activateAllWindows, .activateIgnoringOtherApps]) ?? false
+    }
     switcharooLog(String(
-        format: "raise: %@ wid=%u pid=%d axMatched=%@ activate()=%@ ax=%.0fms",
+        format: "raise: %@ wid=%u pid=%d axMatched=%@ activate()=%@%@ ax=%.0fms",
         w.appName, w.windowID, w.pid,
-        axMatched ? "Y" : "**N**", activated ? "Y" : "**N**", axMs))
+        axMatched ? "Y" : "**N**",
+        activated ? "Y" : "**N**",
+        forced ? (activated ? " (via forced fallback)" : " (fallback also refused)") : "",
+        axMs))
 }
 
 // MARK: - Filtering ------------------------------------------------------------
@@ -1404,12 +1421,18 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let pickDesc = pick.map { "\($0.appName) wid=\($0.windowID) \"\($0.title)\"" }
             ?? "**none**"
         switcharooLog("commit: selected=\(selected)/\(rows.count) pick=\(pickDesc) query=\"\(view.searchField.stringValue)\" frontmost=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?") isActive=\(NSApp.isActive) panelKey=\(panel.isKeyWindow)")
-        dismissPanel()
+        // Raise BEFORE dismissing. Ordering the panel out drops our only
+        // window, which starts macOS deactivating us — and an app that is no
+        // longer active is refused when it asks to activate another one. Doing
+        // it in this order means we still hold activation when we ask.
         if let pick {
             // Picking a previously-dismissed window cancels its "dismissed"
             // status so it returns to normal MRU position next time.
             dismissedWindowIDs.removeAll(where: { $0 == pick.windowID })
             raise(pick)
+        }
+        dismissPanel()
+        if let pick {
             // Did the target actually end up frontmost? This is the line to
             // look at when a switch "didn't take".
             let pid = pick.pid, name = pick.appName
