@@ -35,6 +35,52 @@ func axApp(_ pid: pid_t) -> AXUIElement {
     return elem
 }
 
+/// One AX query for an app's windows, shared by every AX path in this file.
+/// Telling "AX told us nothing" apart from "AX told us there is nothing" is the
+/// whole game here — the first means fall back to what we knew last time, the
+/// second means the app really has no windows — so the result says which.
+struct AXWindowQuery {
+    /// nil when AX gave no usable answer: an error, a timeout, or the empty
+    /// list Chromium-backed apps return once their windows are on another
+    /// Space. Non-nil — *including empty* — means AX answered authoritatively.
+    var windows: [(element: AXUIElement, windowID: CGWindowID)]?
+    /// AX listed real windows we could not map to a CGWindowID, so we are blind
+    /// for this app even though it answered.
+    var hadUnresolvable = false
+    var error: AXError = .success
+}
+
+func axQueryWindows(_ pid: pid_t) -> AXWindowQuery {
+    guard let axGet = axGetWindow else { return AXWindowQuery(windows: nil) }
+    var raw: AnyObject?
+    let err = AXUIElementCopyAttributeValue(
+        axApp(pid), kAXWindowsAttribute as CFString, &raw)
+    guard err == .success, let elems = raw as? [AXUIElement], !elems.isEmpty else {
+        return AXWindowQuery(windows: nil, error: err)
+    }
+    var out: [(element: AXUIElement, windowID: CGWindowID)] = []
+    var unresolvable = false
+    for e in elems {
+        // Finder reports the *desktop* here as an AXScrollArea: not a window,
+        // and it has no CGWindowID. Match on role, not subrole — a browser
+        // window can legitimately be subrole AXDialog.
+        var roleRaw: AnyObject?
+        guard AXUIElementCopyAttributeValue(e, kAXRoleAttribute as CFString, &roleRaw) == .success,
+              (roleRaw as? String) == kAXWindowRole
+        else { continue }
+        var wid: CGWindowID = 0
+        if axGet(e, &wid) == .success { out.append((e, wid)) } else { unresolvable = true }
+    }
+    return AXWindowQuery(windows: out, hadUnresolvable: unresolvable, error: err)
+}
+
+/// The AX element for one specific window, or nil if AX cannot see it.
+/// windowID 0 is the app-level sentinel and never matches a window.
+func axWindow(_ pid: pid_t, _ windowID: CGWindowID) -> AXUIElement? {
+    guard windowID != 0 else { return nil }
+    return axQueryWindows(pid).windows?.first { $0.windowID == windowID }?.element
+}
+
 // MARK: - Debug log -----------------------------------------------------------
 // Writes to /tmp/switcharoo.log so we can diagnose issues without running from a
 // terminal. Inspect with: tail -f /tmp/switcharoo.log
@@ -191,6 +237,7 @@ func listWindows() -> [WindowRecord] {
     var axConfirmedWindowIDs = Set<CGWindowID>()   // AX agrees these are real
     var axFunctionalPids = Set<pid_t>()             // axGet works for this pid
     var fetchedPids = Set<pid_t>()
+    var windowlessPids = Set<pid_t>()   // AX says: this app has no windows open
     // Which CGWindowIDs each pid currently owns — used to validate cache hits.
     var cgWidsByPid: [pid_t: Set<CGWindowID>] = [:]
     for d in infos {
@@ -224,54 +271,36 @@ func listWindows() -> [WindowRecord] {
     func loadAXTitles(for pid: pid_t) {
         if fetchedPids.contains(pid) { return }
         fetchedPids.insert(pid)
-        guard let axGet = axGetWindow else { return }
-        let appElem = axApp(pid)
-        var raw: AnyObject?
-        let err = AXUIElementCopyAttributeValue(appElem, kAXWindowsAttribute as CFString, &raw)
-        guard err == .success, let axWindows = raw as? [AXUIElement], !axWindows.isEmpty
-        else {
-            // err -25204 (cannotComplete) is the messaging timeout.
-            useCachedAX(for: pid, because: "miss(err=\(err.rawValue))")
+        let q = axQueryWindows(pid)
+        guard let wins = q.windows else {
+            // -25204 (cannotComplete) is the messaging timeout; err 0 with no
+            // list is the Chromium-on-another-Space case.
+            useCachedAX(for: pid, because: "miss(err=\(q.error.rawValue))")
+            return
+        }
+        guard !wins.isEmpty else {
+            if q.hadUnresolvable {
+                useCachedAX(for: pid, because: "no-resolvable-windows")
+                return
+            }
+            // AX answered, with content, and none of it was a window: the app
+            // genuinely has nothing open — Finder whenever no browser window is
+            // up. Its leftover CG overlay windows must not become rows, but the
+            // app is still a switch target, so the caller emits one app-level
+            // entry for it instead.
+            axFunctionalPids.insert(pid)
+            windowlessPids.insert(pid)
             return
         }
         var confirmed = Set<CGWindowID>()
         var titles: [CGWindowID: String] = [:]
-        var sawRealWindow = false
-        for axWin in axWindows {
-            // Finder reports the *desktop* in kAXWindows as an AXScrollArea: it
-            // has no CGWindowID (_AXUIElementGetWindow returns -25201) and is not
-            // something you can switch to. Filter on role rather than subrole —
-            // a browser window can legitimately be subrole AXDialog.
-            var roleRaw: AnyObject?
-            guard AXUIElementCopyAttributeValue(axWin, kAXRoleAttribute as CFString, &roleRaw) == .success,
-                  (roleRaw as? String) == kAXWindowRole
-            else { continue }
-            sawRealWindow = true
-            var wid: CGWindowID = 0
-            guard axGet(axWin, &wid) == .success else { continue }
+        for (elem, wid) in wins {
             confirmed.insert(wid)
             var titleRaw: AnyObject?
-            if AXUIElementCopyAttributeValue(axWin, kAXTitleAttribute as CFString, &titleRaw) == .success,
+            if AXUIElementCopyAttributeValue(elem, kAXTitleAttribute as CFString, &titleRaw) == .success,
                let s = titleRaw as? String {
                 titles[wid] = s
             }
-        }
-        guard !confirmed.isEmpty else {
-            if !sawRealWindow {
-                // AX answered, with content, and none of it was a window. That is
-                // a definitive "nothing here to switch to" — Finder with no
-                // browser windows open — not a failure to interrogate. Do NOT
-                // fall back to the app's leftover CG overlay windows; that
-                // fabricates an untitled row pointing at a phantom windowID that
-                // raise() can never match. Marking the pid AX-functional makes
-                // the confirmation filter below drop every one of them.
-                axFunctionalPids.insert(pid)
-                switcharooLog("listWindows: pid=\(pid) has no AX windows (only non-window elements) — no switch target, dropping its CG windows")
-                return
-            }
-            // Role said window but the ID would not resolve — genuinely blind.
-            useCachedAX(for: pid, because: "no-resolvable-windows")
-            return
         }
         axFunctionalPids.insert(pid)
         axConfirmedWindowIDs.formUnion(confirmed)
@@ -292,6 +321,7 @@ func listWindows() -> [WindowRecord] {
     // ordering directly — no further sort needed.
     var out: [WindowRecord] = []
     var seenIDs = Set<CGWindowID>()
+    var emittedWindowless = Set<pid_t>()
     for d in infos {
         let layer = d[kCGWindowLayer as String] as? Int ?? -1
         let pid = d[kCGWindowOwnerPID as String] as? pid_t ?? 0
@@ -308,10 +338,24 @@ func listWindows() -> [WindowRecord] {
         if let path = ra.bundleURL?.path, isSystemHelperPath(path) { continue }
         loadAXTitles(for: pid)
 
+        // An app with no windows open is still a switch target — the system
+        // switcher lists Finder whether or not anything is open. Emit a single
+        // app-level row (windowID 0 = "no particular window, just activate the
+        // app") instead of its leftover CG overlay windows, which would be
+        // untitled and unraisable.
+        if windowlessPids.contains(pid) {
+            if !emittedWindowless.contains(pid) {
+                emittedWindowless.insert(pid)
+                out.append(WindowRecord(windowID: 0, pid: pid,
+                                        appName: app, title: "", icon: ra.icon))
+            }
+            continue
+        }
+
         // Transient CG window? If AX works for this pid but didn't confirm
         // this windowID, it's a helper/HUD/overlay and we drop it. If AX is
-        // *broken* for the pid (Finder sometimes), we keep CG windows as a
-        // fallback so the app is still switchable.
+        // *broken* for the pid, we keep CG windows as a fallback so the app is
+        // still switchable.
         if axFunctionalPids.contains(pid),
            !axConfirmedWindowIDs.contains(wid) { continue }
 
@@ -341,22 +385,14 @@ func raise(_ w: WindowRecord) {
     raiseGeneration += 1
     let gen = raiseGeneration
     let t0 = CACurrentMediaTime()
-    let app = axApp(w.pid)
-    var raw: AnyObject?
+    // windowID 0 is the app-level target used for apps with no windows open
+    // (Finder with nothing on screen): there is no window to raise, so
+    // activation is the whole job.
     var axMatched = false
-    if AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &raw) == .success,
-       let axWindows = raw as? [AXUIElement],
-       let axGet = axGetWindow
-    {
-        for axWin in axWindows {
-            var wid: CGWindowID = 0
-            if axGet(axWin, &wid) == .success, wid == w.windowID {
-                AXUIElementPerformAction(axWin, kAXRaiseAction as CFString)
-                _ = AXUIElementSetAttributeValue(axWin, kAXMainAttribute as CFString, kCFBooleanTrue)
-                axMatched = true
-                break
-            }
-        }
+    if let axWin = axWindow(w.pid, w.windowID) {
+        AXUIElementPerformAction(axWin, kAXRaiseAction as CFString)
+        _ = AXUIElementSetAttributeValue(axWin, kAXMainAttribute as CFString, kCFBooleanTrue)
+        axMatched = true
     }
     let axMs = (CACurrentMediaTime() - t0) * 1000
     // Activation is a *request* under macOS 14+ cooperative activation, and it
@@ -379,7 +415,7 @@ func raise(_ w: WindowRecord) {
     switcharooLog(String(
         format: "raise: %@ wid=%u pid=%d axMatched=%@ activate()=%@%@ ax=%.0fms",
         w.appName, w.windowID, w.pid,
-        axMatched ? "Y" : "**N**",
+        w.windowID == 0 ? "n/a(app-level)" : (axMatched ? "Y" : "**N**"),
         activated ? "Y" : "**N**",
         forced ? (activated ? " (via forced fallback)" : " (fallback also refused)") : "",
         axMs))
@@ -1079,16 +1115,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     // MARK: Window management actions ------------------------------------------
 
     private func axWindowFor(_ r: WindowRecord) -> AXUIElement? {
-        let app = axApp(r.pid)
-        var raw: AnyObject?
-        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &raw) == .success,
-              let wins = raw as? [AXUIElement],
-              let axGet = axGetWindow else { return nil }
-        for w in wins {
-            var wid: CGWindowID = 0
-            if axGet(w, &wid) == .success, wid == r.windowID { return w }
-        }
-        return nil
+        axWindow(r.pid, r.windowID)
     }
 
     private func selectedRecord() -> WindowRecord? {
@@ -1099,6 +1126,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     /// Append a windowID to the dismissed list, removing any prior occurrence
     /// so it lands at the end (most-recently-dismissed).
     private func markDismissed(_ wid: CGWindowID) {
+        // 0 is the app-level sentinel and is shared by every windowless app, so
+        // recording it would sink unrelated apps to the bottom together.
+        guard wid != 0 else { return }
         dismissedWindowIDs.removeAll(where: { $0 == wid })
         dismissedWindowIDs.append(wid)
     }
@@ -1358,19 +1388,13 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     private func refreshLiveTitles() {
-        guard panel.isVisible, !rows.isEmpty, let axGet = axGetWindow else { return }
+        guard panel.isVisible, !rows.isEmpty else { return }
         var newRows = rows
         var changed = false
         // Group by pid so we only do one kAXWindowsAttribute fetch per app.
-        let pids = Set(rows.map(\.pid))
-        for pid in pids {
-            let appElem = axApp(pid)
-            var raw: AnyObject?
-            guard AXUIElementCopyAttributeValue(appElem, kAXWindowsAttribute as CFString, &raw) == .success,
-                  let axWindows = raw as? [AXUIElement] else { continue }
-            for axWin in axWindows {
-                var wid: CGWindowID = 0
-                guard axGet(axWin, &wid) == .success else { continue }
+        for pid in Set(rows.map(\.pid)) {
+            guard let wins = axQueryWindows(pid).windows else { continue }
+            for (axWin, wid) in wins {
                 guard let idx = newRows.firstIndex(where: { $0.windowID == wid }) else { continue }
                 var titleRaw: AnyObject?
                 guard AXUIElementCopyAttributeValue(axWin, kAXTitleAttribute as CFString, &titleRaw) == .success,
