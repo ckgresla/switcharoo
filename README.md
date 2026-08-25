@@ -1,6 +1,6 @@
 # switcharoo
 
-A tiny macOS window switcher — Cmd+Tab, but it knows about windows.
+A "really good" macOS window switcher.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/switcharoo-dark.png">
