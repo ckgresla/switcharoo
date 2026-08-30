@@ -381,6 +381,22 @@ func listWindows() -> [WindowRecord] {
 }
 
 // MARK: - Raise a specific window ----------------------------------------------
+
+/// Front-to-back list of normal-layer windows, for the log. An ordering bug is
+/// invisible to a "did the target come frontmost?" check — the target lands
+/// correctly and some *other* window of the same app rides up with it. Only the
+/// full stack shows that.
+func zorderSnapshot() -> String {
+    guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                kCGNullWindowID) as? [[String: Any]] else { return "?" }
+    return info.compactMap { d -> String? in
+        guard (d[kCGWindowLayer as String] as? Int) == 0,
+              let owner = d[kCGWindowOwnerName as String] as? String,
+              let wid = d[kCGWindowNumber as String] as? CGWindowID else { return nil }
+        return "\(owner):\(wid)"
+    }.joined(separator: " > ")
+}
+
 func raise(_ w: WindowRecord) {
     raiseGeneration += 1
     let gen = raiseGeneration
@@ -389,37 +405,62 @@ func raise(_ w: WindowRecord) {
     // (Finder with nothing on screen): there is no window to raise, so
     // activation is the whole job.
     var axMatched = false
+    var focusErr: AXError = .success
     if let axWin = axWindow(w.pid, w.windowID) {
         AXUIElementPerformAction(axWin, kAXRaiseAction as CFString)
+        // Activating an app orders its *main and key* windows front. Claiming
+        // only main leaves key on whichever window the app last used, so that
+        // one is brought up too: switch to a reply window and the inbox rides
+        // along, landing above the app you switched away from. Claiming both
+        // leaves exactly one window for activation to raise.
         _ = AXUIElementSetAttributeValue(axWin, kAXMainAttribute as CFString, kCFBooleanTrue)
+        focusErr = AXUIElementSetAttributeValue(axWin, kAXFocusedAttribute as CFString, kCFBooleanTrue)
         axMatched = true
     }
     let axMs = (CACurrentMediaTime() - t0) * 1000
+    let zBefore = zorderSnapshot()
     // Activation is a *request* under macOS 14+ cooperative activation, and it
     // is refused unless we are still the active app. Caught in the wild:
     //   raise: Emacs wid=1540 axMatched=Y activate()=N  → targetIsFrontmost=N
     // The AX raise had already matched the right window; only the app-level
     // activation was denied, so the switch silently did nothing and the user
     // had to invoke switcharoo a second time. commit() now raises before
-    // dismissing the panel so we still hold activation here, and if the
-    // cooperative form is still refused we fall back to the deprecated
-    // ignoringOtherApps form, which is not subject to that arbitration.
+    // dismissing the panel so we still hold activation when we ask.
+    // .activateAllWindows orders *every* window the target owns front, which is
+    // the same ordering bug by another route. A window-level pick wants one
+    // window raised; only an app-level pick (windowID 0) means "the whole app".
     let target = NSRunningApplication(processIdentifier: w.pid)
-    var activated = target?.activate(options: [.activateAllWindows]) ?? false
-    var forced = false
+    let opts = activationOptions(for: w)
+    var activated = target?.activate(options: opts) ?? false
+    var retried = false
     if !activated {
-        forced = true
-        activated = target?.activate(
-            options: [.activateAllWindows, .activateIgnoringOtherApps]) ?? false
+        // Asking a second time is the only lever left: .activateIgnoringOtherApps
+        // is documented as having no effect since macOS 14, so it is not a
+        // stronger form of the same request, just a deprecated spelling of it.
+        retried = true
+        activated = target?.activate(options: opts) ?? false
     }
     switcharooLog(String(
-        format: "raise: %@ wid=%u pid=%d axMatched=%@ activate()=%@%@ ax=%.0fms",
+        format: "raise: %@ wid=%u pid=%d axMatched=%@ focus=%@ activate()=%@%@ ax=%.0fms",
         w.appName, w.windowID, w.pid,
         w.windowID == 0 ? "n/a(app-level)" : (axMatched ? "Y" : "**N**"),
+        focusErr == .success ? "Y" : "**N**(\(focusErr.rawValue))",
         activated ? "Y" : "**N**",
-        forced ? (activated ? " (via forced fallback)" : " (fallback also refused)") : "",
+        retried ? (activated ? " (on retry)" : " (retry also refused)") : "",
         axMs))
+    // Both stacks, so a report of "the other window came up too" can be read
+    // straight off the log instead of guessed at.
+    switcharooLog("raise: z before: \(zBefore)")
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+        switcharooLog("raise: z after : \(zorderSnapshot())")
+    }
     verifyRaise(w, generation: gen, attemptsLeft: 3)
+}
+
+/// A window-level pick raises exactly that window; an app-level pick (the
+/// windowID 0 row used for apps with nothing open) means the app itself.
+private func activationOptions(for w: WindowRecord) -> NSApplication.ActivationOptions {
+    w.windowID == 0 ? [.activateAllWindows] : []
 }
 
 /// Bumped on every raise so a pending verification can tell it has been
@@ -431,7 +472,7 @@ private var raiseGeneration = 0
 /// able to reproduce on demand (the one captured refusal happened while the
 /// target's window was mid-resize). Since the cause is not pinned down, don't
 /// trust the return value at all: check whether the target actually came
-/// forward and re-issue the forced activation if it did not. Bounded, and
+/// forward and ask again if it did not. Bounded, and
 /// abandoned the moment a newer raise supersedes this one, so it can neither
 /// spin on an unactivatable app nor fight the user's next switch.
 private func verifyRaise(_ w: WindowRecord, generation: Int, attemptsLeft: Int) {
@@ -443,8 +484,8 @@ private func verifyRaise(_ w: WindowRecord, generation: Int, attemptsLeft: Int) 
         }
         guard let target = NSRunningApplication(processIdentifier: w.pid),
               !target.isTerminated else { return }
-        switcharooLog("raise: \(w.appName) still not frontmost — re-issuing forced activation (\(attemptsLeft - 1) attempt(s) left)")
-        _ = target.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        switcharooLog("raise: \(w.appName) still not frontmost — asking again (\(attemptsLeft - 1) attempt(s) left)")
+        _ = target.activate(options: activationOptions(for: w))
         verifyRaise(w, generation: generation, attemptsLeft: attemptsLeft - 1)
     }
 }
