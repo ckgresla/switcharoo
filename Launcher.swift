@@ -67,7 +67,7 @@ enum LauncherRoute: Equatable {
     var tool: SwitcharooTool? { self == .schedule ? .schedule : self == .timers ? .timer : nil }
 }
 struct LauncherResult: Identifiable {
-    enum Action { case application(LaunchableApplication), route(LauncherRoute), command(String), toggleSystemAppearance, appearance(SwitcharooAppearance) }
+    enum Action { case openURL(URL), application(LaunchableApplication), route(LauncherRoute), command(String), toggleSystemAppearance, appearance(SwitcharooAppearance) }
     var id: String
     var title: String
     var detail: String
@@ -166,15 +166,20 @@ final class LauncherModel: ObservableObject {
         if trimmed.isEmpty { return cachedRanked }
         if cachedQuery == trimmed { return cachedMatches }
         cachedQuery = trimmed
-        cachedMatches = cachedAll.enumerated().compactMap { index,item -> (Int,Int,LauncherResult)? in
-            guard let rank = LauncherSearch.score(trimmed,in:item.title,keywords:item.keywords) else { return nil }
-            return (rank,index,item)
-        }.sorted { $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 < $1.0 }.map { $0.2 }
+        if let url = LauncherSearch.webURL(trimmed) {
+            cachedMatches = [.init(id:"open-url",title:"Open URL",detail:url.absoluteString,symbol:"globe",action:.openURL(url))]
+        } else {
+            cachedMatches = LauncherSearch.matchingIndices(trimmed,in:cachedRanked.map { ($0.title,$0.keywords) }).map { cachedRanked[$0] }
+        }
         return cachedMatches
     }
     func choose(_ result: LauncherResult) {
-        usage.record(result.id); saveUsage()
+        if case .openURL = result.action { /* Transient URLs are not saved in launch history. */ }
+        else { usage.record(result.id); saveUsage() }
         switch result.action {
+        case .openURL(let url):
+            LauncherController.shared.dismiss()
+            if !NSWorkspace.shared.open(url) { LauncherController.shared.show(); message = "Could not open URL in the default browser." }
         case .route(let route): navigate(route)
         case .appearance(let mode): mode.save(); focusGeneration += 1
         case .toggleSystemAppearance:
@@ -656,7 +661,7 @@ struct LauncherView: View {
             .overlay { RoundedRectangle(cornerRadius: 28).strokeBorder(Color.primary.opacity(0.09),lineWidth: 1) }
             .tint(ToolStyle.accent(scheme)).onAppear { searchFocused = model.route == .search }
             .onChange(of: model.focusGeneration) { _,_ in searchFocused = model.route == .search }
-            .onChange(of: model.query) { _,_ in model.selectedID = results.first?.id ?? ""; calculator.update(model.query); LauncherController.shared.resize() }
+            .onChange(of: model.query) { _,_ in model.selectedID = results.first?.id ?? ""; calculator.update(LauncherSearch.webURL(model.query) == nil ? model.query : ""); LauncherController.shared.resize() }
             .onChange(of: catalog.applications.count) { _,_ in LauncherController.shared.resize() }
             .onExitCommand(perform:exitSearch)
             .alert("Switcharoo",isPresented:Binding(get:{ !model.message.isEmpty },set:{ if !$0 { model.message = "" } })) { Button("OK") { model.message = "" } } message: { Text(model.message) }
@@ -677,7 +682,8 @@ struct LauncherView: View {
         else { Image(systemName: result.symbol).font(SwitcharooTypography.ui(size: size-3,weight: .light)).frame(width: size,height: size) }
     }
     @ViewBuilder private func pinAction(_ result: LauncherResult) -> some View {
-        if model.usage.pinned.contains(result.id) { Button("Unpin from bar") { model.togglePin(result.id) } }
+        if case .openURL = result.action { EmptyView() }
+        else if model.usage.pinned.contains(result.id) { Button("Unpin from bar") { model.togglePin(result.id) } }
         else { Button(model.usage.pinned.count < 3 ? "Pin to bar" : "3 items pinned") { model.togglePin(result.id) }.disabled(model.usage.pinned.count >= 3) }
     }
     private var resultList: some View {
@@ -693,7 +699,7 @@ struct LauncherView: View {
                                 Spacer()
                                 if case .appearance(let mode) = result.action,mode == SwitcharooAppearance.saved { Image(systemName:"checkmark").font(.system(size:10)).foregroundStyle(.secondary) }
                                 if model.usage.pinned.contains(result.id) { Image(systemName: "pin.fill").font(.system(size: 10)).foregroundStyle(.secondary) }
-                                Text(result.detail).font(SwitcharooTypography.ui(size: 12)).foregroundStyle(ToolStyle.secondary(scheme))
+                                Text(result.detail).font(SwitcharooTypography.ui(size: 12)).foregroundStyle(ToolStyle.secondary(scheme)).lineLimit(1).truncationMode(.middle)
                             }.foregroundStyle(.primary).padding(.horizontal,14).frame(height: 38)
                                 .background(model.selectedID == result.id ? Color.primary.opacity(0.065) : .clear,in: RoundedRectangle(cornerRadius: 10)).contentShape(Rectangle())
                         }.buttonStyle(LauncherHoverStyle(horizontal:0,vertical:0,radius:10)).id(result.id).contextMenu { pinAction(result) }
@@ -827,6 +833,7 @@ struct LauncherItemAction: Identifiable {
         }
         let title: String
         switch item.action {
+        case .openURL: title = "Open URL"
         case .application: title = "Open Application"
         case .toggleSystemAppearance: title = "Toggle Appearance"
         case .appearance: title = "Use Appearance"
@@ -849,6 +856,12 @@ struct LauncherItemAction: Identifiable {
         }
         if case .command = item.action {
             actions.append(.init(id:"configure",title:"Configure Window Shortcuts",symbol:"slider.horizontal.3",key:"",modifiers:[],shortcut:"",run:{ model.navigate(.windowControls) }))
+        }
+        if case .openURL(let url) = item.action {
+            actions.append(.init(id:"copy-url",title:"Copy URL",symbol:"doc.on.doc",key:"c",modifiers:[.command,.option],shortcut:"⌥ ⌘ C",run:{
+                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.absoluteString,forType:.string)
+            }))
+            return actions
         }
         let pinned = model.usage.pinned.contains(item.id)
         actions.append(.init(id:"pin",title:pinned ? "Unpin from Bar" : "Pin to Bar",symbol:pinned ? "pin.slash" : "pin",key:"p",modifiers:[.command,.shift],shortcut:"⇧ ⌘ P",enabled:pinned || model.usage.pinned.count < 3,run:{ model.togglePin(item.id) }))
@@ -1002,7 +1015,15 @@ extension LauncherController {
                 elapsed.append((CACurrentMediaTime()-start)*1000)
             }
             capture("now")
-            let output: [String:Any] = ["finderInCompletedCatalog":finder,"nowResult":launcher.calculator.answer?.value ?? "","queryToDisplayMilliseconds":elapsed,"medianMilliseconds":elapsed.sorted()[elapsed.count/2]]
+            let nowResult = launcher.calculator.answer?.value ?? ""
+            launcher.model.query = "https://example.com/a?q=one%20two#part"
+            try? await Task.sleep(nanoseconds:50_000_000)
+            let urlItem = launcher.model.selectedVisibleResult
+            let urlSelected: Bool
+            if case .openURL(let url) = urlItem?.action { urlSelected = url.absoluteString == launcher.model.query } else { urlSelected = false }
+            let urlActions = urlItem.map { LauncherItemAction.actions(for:$0,model:launcher.model).map(\.title) } ?? []
+            capture("url")
+            let output: [String:Any] = ["finderInCompletedCatalog":finder,"nowResult":nowResult,"queryToDisplayMilliseconds":elapsed,"medianMilliseconds":elapsed.sorted()[elapsed.count/2],"urlSelected":urlSelected,"urlClearsCalculator":!launcher.calculator.hasContent && !launcher.calculator.canCopy,"urlActions":urlActions]
             if let data = try? JSONSerialization.data(withJSONObject:output,options:.prettyPrinted) { try? data.write(to:URL(fileURLWithPath:"/tmp/switcharoo-responsiveness.json")) }
             launcher.dismiss(restoreFocus:true)
             NSApp.terminate(nil)

@@ -25,6 +25,38 @@ enum LauncherSearch {
         return url.deletingPathExtension().lastPathComponent
     }
 
+    /// Candidates arrive in learned order; relevance wins, then learned order breaks ties.
+    static func matchingIndices(_ query: String,in candidates: [(title: String,keywords: String)]) -> [Int] {
+        candidates.enumerated().compactMap { index,item -> (Int,Int)? in
+            guard let rank = score(query,in:item.title,keywords:item.keywords) else { return nil }
+            return (rank,index)
+        }.sorted { $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 < $1.0 }.map { $0.1 }
+    }
+
+    /// Recognize web addresses without treating arbitrary search text as a URL.
+    static func webURL(_ input: String) -> URL? {
+        let text = input.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !text.isEmpty,!text.contains(where: { $0.isWhitespace || $0.isNewline }),
+              !text.contains("\\") else { return nil }
+        let explicit = text.contains("://")
+        let address = explicit ? text : "https://" + text
+        guard let parts = URLComponents(string:address),
+              let scheme = parts.scheme?.lowercased(),["http","https"].contains(scheme),
+              parts.user == nil,parts.password == nil,
+              let host = parts.host,!host.isEmpty,
+              parts.port.map({ (1...65535).contains($0) }) ?? true,
+              let url = parts.url else { return nil }
+        if !explicit {
+            let labels = host.split(separator:".",omittingEmptySubsequences:false)
+            let domain = labels.count >= 2 && labels.allSatisfy { label in
+                !label.isEmpty && label.first != "-" && label.last != "-" && label.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" }
+            } && labels.last!.count >= 2 && labels.last!.allSatisfy { $0.isLetter }
+            let ipv4 = labels.count == 4 && labels.allSatisfy { Int($0).map { (0...255).contains($0) } ?? false }
+            guard domain || ipv4 || host.lowercased() == "localhost" else { return nil }
+        }
+        return url
+    }
+
     // Lower scores rank first; nil means no match. Diacritics and case do not
     // affect matching, and all query words must occur or match as a subsequence.
     static func score(_ query: String,in title: String,keywords: String = "") -> Int? {

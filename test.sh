@@ -11,7 +11,7 @@ swiftc -swift-version 5 -module-cache-path "$PWD/.build/module-cache" ExchangeRa
 swiftc -swift-version 5 -module-cache-path "$PWD/.build/module-cache" LauncherPlacement.swift Tests/LauncherPlacementTests.swift -o .build/launcher-placement-tests
 .build/launcher-placement-tests
 
-swiftc -swift-version 5 -module-cache-path "$PWD/.build/module-cache" LauncherSearch.swift Tests/LauncherNameTests.swift -o .build/launcher-name-tests
+swiftc -swift-version 5 -module-cache-path "$PWD/.build/module-cache" LauncherSearch.swift LauncherUsage.swift Tests/LauncherNameTests.swift -o .build/launcher-name-tests
 .build/launcher-name-tests
 
 swiftc -swift-version 5 -module-cache-path "$PWD/.build/module-cache" WindowGeometry.swift AppShortcutConfiguration.swift Tests/AppShortcutTests.swift -o .build/app-shortcut-tests
