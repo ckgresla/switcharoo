@@ -24,7 +24,7 @@ final class ApplicationCatalog: ObservableObject {
         runningPaths = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap(\.bundleURL).map(\.path))
     }
     private var loading = false
-    private var refreshedAt: Date?
+    private(set) var refreshedAt: Date?
     private var icons: [String:NSImage] = [:]
     func refresh() {
         guard !loading,refreshedAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true else { return }; loading = true
@@ -34,19 +34,20 @@ final class ApplicationCatalog: ObservableObject {
                 return LaunchableApplication(name: LauncherSearch.applicationName([app.localizedName],url:url),url: url,bundleID: app.bundleIdentifier)
             }
         }
+        // Finder lives directly in CoreServices, outside its Applications subfolder.
+        let runningURLs = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.compactMap(\.bundleURL)
+        let finderURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.apple.finder")
+        let knownURLs = runningURLs + [finderURL].compactMap { $0 }
         DispatchQueue.global(qos: .utility).async {
-            let roots = ["/Applications","/System/Applications","/System/Library/CoreServices/Applications",NSHomeDirectory()+"/Applications"]
+            let roots = ["/Applications","/System/Applications","/System/Library/CoreServices/Applications",NSHomeDirectory()+"/Applications"].map { URL(fileURLWithPath:$0) }
             var found: [LaunchableApplication] = [],seen = Set<String>()
-            for path in roots {
-                guard let enumerator = FileManager.default.enumerator(at: URL(fileURLWithPath: path),includingPropertiesForKeys: [.isDirectoryKey],options: [.skipsHiddenFiles,.skipsPackageDescendants]) else { continue }
-                for case let url as URL in enumerator where url.pathExtension.lowercased() == "app" {
-                    let bundle = Bundle(url: url)
-                    if bundle?.object(forInfoDictionaryKey: "LSBackgroundOnly") as? Bool == true { continue }
-                    let key = bundle?.bundleIdentifier ?? url.path
-                    guard seen.insert(key).inserted,key != Bundle.main.bundleIdentifier else { continue }
-                    let name = LauncherSearch.applicationName([bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String,bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String],url:url)
-                    found.append(.init(name: name,url: url,bundleID: bundle?.bundleIdentifier))
-                }
+            for url in LauncherSearch.applicationURLs(in:roots,including:knownURLs) {
+                let bundle = Bundle(url:url)
+                if bundle?.object(forInfoDictionaryKey:"LSBackgroundOnly") as? Bool == true { continue }
+                let key = bundle?.bundleIdentifier ?? url.path
+                guard seen.insert(key).inserted,key != Bundle.main.bundleIdentifier else { continue }
+                let name = LauncherSearch.applicationName([bundle?.object(forInfoDictionaryKey:"CFBundleDisplayName") as? String,bundle?.object(forInfoDictionaryKey:"CFBundleName") as? String],url:url)
+                found.append(.init(name:name,url:url,bundleID:bundle?.bundleIdentifier))
             }
             let sorted = found.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             DispatchQueue.main.async { self.applications = sorted; self.loading = false; self.refreshedAt = Date() }
@@ -964,5 +965,47 @@ private struct LauncherPinPicker: View {
         guard !items.isEmpty else { return }
         let index = items.firstIndex(where:{$0.id == selected}) ?? 0
         selected = items[(index+delta+items.count)%items.count].id
+    }
+}
+
+extension LauncherController {
+    func runResponsiveness() {
+        let launcher = self
+        CalculatorEngine.shared.prewarm()
+        launcher.show(preview:true)
+        Task { @MainActor in
+            for _ in 0..<100 where ApplicationCatalog.shared.refreshedAt == nil { try? await Task.sleep(nanoseconds:50_000_000) }
+            launcher.model.query = "finder"
+            try? await Task.sleep(nanoseconds:150_000_000)
+            let matches = launcher.model.results(apps:ApplicationCatalog.shared.applications,config:WindowManager.shared.configuration)
+            let finder = matches.contains { if case .application(let app) = $0.action { return app.bundleID == "com.apple.finder" }; return false }
+            @MainActor func capture(_ name: String) {
+                guard let view = launcher.panel?.contentView else { return }
+                view.layoutSubtreeIfNeeded()
+                guard let rep = view.bitmapImageRepForCachingDisplay(in:view.bounds) else { return }
+                view.cacheDisplay(in:view.bounds,to:rep)
+                try? rep.representation(using:.png,properties:[:])?.write(to:URL(fileURLWithPath:"/tmp/switcharoo-responsiveness-"+name+".png"))
+            }
+            capture("finder")
+            var elapsed: [Double] = []
+            for _ in 0..<5 {
+                launcher.model.query = ""
+                try? await Task.sleep(nanoseconds:50_000_000)
+                let start = CACurrentMediaTime()
+                launcher.model.query = "now"
+                for _ in 0..<100 {
+                    try? await Task.sleep(nanoseconds:10_000_000)
+                    if launcher.calculator.canCopy && launcher.calculator.evaluatedQuery == "now" { break }
+                }
+                launcher.panel?.contentView?.layoutSubtreeIfNeeded()
+                launcher.panel?.displayIfNeeded()
+                elapsed.append((CACurrentMediaTime()-start)*1000)
+            }
+            capture("now")
+            let output: [String:Any] = ["finderInCompletedCatalog":finder,"nowResult":launcher.calculator.answer?.value ?? "","queryToDisplayMilliseconds":elapsed,"medianMilliseconds":elapsed.sorted()[elapsed.count/2]]
+            if let data = try? JSONSerialization.data(withJSONObject:output,options:.prettyPrinted) { try? data.write(to:URL(fileURLWithPath:"/tmp/switcharoo-responsiveness.json")) }
+            launcher.dismiss(restoreFocus:true)
+            NSApp.terminate(nil)
+        }
     }
 }

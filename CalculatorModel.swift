@@ -27,6 +27,11 @@ final class CalculatorModel: ObservableObject {
         self.evaluate = evaluate; self.rateProvider = rateProvider
     }
     deinit { debounce?.cancel(); evaluation?.cancel(); network?.cancel() }
+    static func inputDelay(for text: String) -> TimeInterval {
+        // Complete clock/date keywords are unambiguous; partial expressions still settle.
+        let keyword = text.trimmingCharacters(in:.whitespacesAndNewlines).lowercased()
+        return ["now","today","tomorrow","yesterday"].contains(keyword) ? 0.02 : 0.1
+    }
     func update(_ text: String,force: Bool = false) {
         guard force || text != query else { return }
         query = text; generation += 1; let current = generation
@@ -36,7 +41,7 @@ final class CalculatorModel: ObservableObject {
         }
         pending = true
         let work = DispatchWorkItem { [weak self] in self?.calculate(text,current:current,force:force) }
-        debounce = work; DispatchQueue.main.asyncAfter(deadline:.now()+0.1,execute:work)
+        debounce = work; DispatchQueue.main.asyncAfter(deadline:.now()+Self.inputDelay(for:text),execute:work)
     }
     private func calculate(_ text: String,current: Int,force: Bool,rates: [String:String] = [:],snapshots: [ExchangeRateSnapshot] = []) {
         guard current == generation else { return }

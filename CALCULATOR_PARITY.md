@@ -27,7 +27,7 @@ No further Raycast UI automation is used following the user's request to restart
 81 worker checks pass, including the ten exact Raycast results. The measured warm
 worker round-trip median was 0.26 ms in this run (not end-to-end launch/paint latency).
 Four process checks cover IPC, worker reuse, deadline termination and recovery.
-Eighteen interaction checks cover typing debounce, retaining old display values while
+Twenty-four interaction checks cover typing debounce, retaining old display values while
 blocking stale copy, obsolete reply rejection, currency re-evaluation, and history.
 
 | Feature | Implementation / validation |
@@ -42,7 +42,11 @@ blocking stale copy, obsolete reply rejection, currency re-evaluation, and histo
 | Color input and conversion | Culori HEX/RGB/HSL/HWB/Lab/LCH/OKLab/OKLCH with alpha and format-copy actions |
 | History, pin, delete, reuse, search | Local persistence; pinned entries survive three-month pruning |
 | Copy formatted/raw/question+answer, swap units, use answer | Native Actions menu; stale results cannot be copied |
-| Responsive evaluation | 100 ms debounce; stable previous result; network outside calculator worker |
+| Responsive evaluation | 20 ms debounce for complete clock/date keywords, 100 ms otherwise; parser prewarming; stable previous result; network outside calculator worker |
+
+`--launcher-responsiveness` checks Finder after the catalog scan and measures five
+`now` queries through native layout/display. On September 6 the median was 33.9 ms
+with 10 ms polling; this is not screen-photon latency or a Raycast comparison.
 
 ## Limits that must not be described as completed parity
 

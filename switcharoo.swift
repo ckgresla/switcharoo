@@ -1089,6 +1089,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         if CommandLine.arguments.contains("--focus-handoff-regression") {
             installMenu(); buildPanel(); LauncherController.shared.runHandoffRegression(app:self); return
         }
+        if CommandLine.arguments.contains("--launcher-responsiveness") {
+            installMenu(); buildPanel(); LauncherController.shared.runResponsiveness(); return
+        }
         if CommandLine.arguments.contains("--focus-regression") {
             installMenu(); buildPanel(); LauncherController.shared.runFocusRegression(app:self); return
         }

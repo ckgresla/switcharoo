@@ -69,7 +69,12 @@ final class CalculatorEngine {
     private var buffer = Data()
     private let executable: URL
     init(executable: URL = Bundle.main.executableURL!) { self.executable = executable }
-    func prewarm() { queue.async { _ = self.start() } }
+    func prewarm() {
+        // Initializing Soulver is costlier than a warm evaluation. Do it before typing.
+        evaluate(["query":"now","locale":Locale.current.identifier,
+                  "rem":UserDefaults.standard.object(forKey:"calculator.rem") as? Double ?? 16,
+                  "automaticUnits":UserDefaults.standard.object(forKey:"calculator.automaticUnits") as? Bool ?? true]) { _ in }
+    }
     func stop() { queue.async { self.reset() } }
     @discardableResult func evaluate(_ request: [String:Any],completion: @escaping (CalculatorResponse) -> Void) -> DispatchWorkItem {
         let work = DispatchWorkItem { [weak self] in

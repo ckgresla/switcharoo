@@ -24,6 +24,16 @@ import Foundation
         model.update("3+3"); model.update(""); await pause(150)
         precondition(calls.count == 4,"clear cancels scheduled evaluation")
 
+        precondition(CalculatorModel.inputDelay(for:"now") == 0.02)
+        precondition(CalculatorModel.inputDelay(for:" TODAY ") == 0.02)
+        precondition(CalculatorModel.inputDelay(for:"2+2") == 0.1)
+        precondition(CalculatorModel.inputDelay(for:"now +") == 0.1)
+        model.update("now"); await pause(60)
+        precondition(calls.count == 5 && calls[4].0 == "now","clock keyword uses the fast path")
+        model.update("now + 2h"); calls[4].1(.init(result:four))
+        precondition(model.answer == nil && !model.canCopy,"fast keywords still reject stale replies")
+        model.update("")
+
         var rateCalls = 0
         let currency = CalculatorModel(evaluate:{ request,completion in
             DispatchQueue.main.async {
@@ -58,6 +68,6 @@ import Foundation
         precondition(reopened.search("2+2").count == 1)
         reopened.clearUnpinned(); precondition(reopened.entries.count == 1 && reopened.entries[0].pinned)
         reopened.delete(reopened.entries[0].id); precondition(reopened.entries.isEmpty)
-        print("18 calculator interaction checks passed (100 ms debounce, stable results, stale completion, rates, history)")
+        print("24 calculator interaction checks passed (20/100 ms debounce, stable results, stale completion, rates, history)")
     }
 }

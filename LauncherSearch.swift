@@ -1,6 +1,23 @@
 import Foundation
 
 enum LauncherSearch {
+    /// Keep explicitly resolved and running apps even when they live outside scan roots.
+    static func applicationURLs(in roots: [URL],including known: [URL]) -> [URL] {
+        var urls: [URL] = [],seen = Set<String>()
+        func append(_ url: URL) {
+            let canonical = url.resolvingSymlinksInPath().standardizedFileURL
+            guard canonical.pathExtension.lowercased() == "app",
+                  FileManager.default.fileExists(atPath:canonical.path),seen.insert(canonical.path).inserted else { return }
+            urls.append(canonical)
+        }
+        known.forEach(append)
+        for root in roots {
+            guard let enumerator = FileManager.default.enumerator(at:root,includingPropertiesForKeys:[.isDirectoryKey],options:[.skipsHiddenFiles,.skipsPackageDescendants]) else { continue }
+            for case let url as URL in enumerator where url.pathExtension.lowercased() == "app" { append(url) }
+        }
+        return urls
+    }
+
     static func applicationName(_ candidates: [String?], url: URL) -> String {
         for candidate in candidates {
             if let name = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { return name }
