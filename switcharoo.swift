@@ -1086,6 +1086,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         SwitcharooAppearance.saved.apply()
+        if CommandLine.arguments.contains("--readme-preview") {
+            LauncherDiagnostics.renderReadme(); return
+        }
         if CommandLine.arguments.contains("--focus-handoff-regression") {
             installMenu(); buildPanel(); LauncherController.shared.runHandoffRegression(app:self); return
         }

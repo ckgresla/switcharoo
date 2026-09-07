@@ -76,7 +76,7 @@ struct LauncherResult: Identifiable {
     var action: Action
 }
 private let launcherPreferences = LauncherPreferences(defaults:
-    CommandLine.arguments.contains("--launcher-demo") || CommandLine.arguments.contains("--launcher-preview") || CommandLine.arguments.contains("--focus-regression")
+    CommandLine.arguments.contains("--launcher-demo") || CommandLine.arguments.contains("--launcher-preview") || CommandLine.arguments.contains("--focus-regression") || CommandLine.arguments.contains("--readme-preview")
     ? UserDefaults(suiteName:"switcharoo.launcher-preview")! : .standard)
 final class LauncherModel: ObservableObject {
     @Published var query = ""
