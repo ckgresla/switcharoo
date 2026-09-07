@@ -6,6 +6,7 @@
   <key>CFBundleIdentifier</key>           <string>systems.wafer.switcharoo</string>
   <key>CFBundleName</key>                 <string>switcharoo</string>
   <key>CFBundleDisplayName</key>          <string>switcharoo</string>
+  <key>CFBundleIconFile</key>             <string>AppIcon</string>
   <key>CFBundlePackageType</key>          <string>APPL</string>
   <key>CFBundleShortVersionString</key>   <string>0.2</string>
   <key>CFBundleVersion</key>              <string>2</string>

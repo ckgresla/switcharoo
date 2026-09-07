@@ -1,5 +1,7 @@
 # Switcharoo
 
+<img src="Resources/AppIcon.png" width="96" height="96" alt="Switcharoo kangaroo logo">
+
 A native macOS window switcher, window manager, and home for focused utility windows. Built with AppKit and SwiftUI, using Inter when installed and the system font otherwise.
 
 ## Switching and commands
