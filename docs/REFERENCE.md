@@ -135,3 +135,7 @@ Launcher preferences are isolated; calendar, timer, and window content use sampl
 Captures are written to `/tmp/switcharoo-readme-*.png` and
 `/tmp/switcharoo-style-{option,command}-tab.png`. Review them before replacing the
 README images in `assets/`.
+
+Run `./scripts/build-readme-gif.sh` (ImageMagick required) after updating the
+six PNG captures in `assets/` to regenerate the centered README animation.
+The loop uses sample data and holds each native view for a few seconds.

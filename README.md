@@ -1,10 +1,14 @@
-# Switcharoo
+<h1 align="center">Switcharoo</h1>
 
-<img src="Resources/AppIcon.png" width="80" height="80" alt="Switcharoo kangaroo logo">
+<p align="center">
+  <img src="Resources/AppIcon.png" width="112" height="112" alt="Switcharoo kangaroo logo">
+</p>
 
-A tasteful replacement for cmd+tab & cmd+space on macOS. Native Swift, AppKit, and SwiftUI.
+<p align="center">A tasteful replacement for cmd+tab &amp; cmd+space on macOS.<br>Native Swift, AppKit, and SwiftUI.</p>
 
-<img src="assets/launcher.png" width="700" alt="Switcharoo launcher finding and opening Finder">
+<p align="center">
+  <img src="assets/switcharoo-demo.gif" width="700" alt="Switcharoo: compact launcher, Finder, calculator, window switching, schedule, and timers">
+</p>
 
 ## Features
 
@@ -16,28 +20,6 @@ A tasteful replacement for cmd+tab & cmd+space on macOS. Native Swift, AppKit, a
 - **Timers:** multiple named timers, pause/resume, saved countdowns, and notifications.
 - **Make it yours:** compact/open modes, remembered placement, alignment guides and snapping, light/dark/system appearance, and Inter when installed.
 
-<details>
-<summary>Screenshots</summary>
-
-**Compact launcher**
-
-<img src="assets/launcher-compact.png" width="700" alt="Compact two-row launcher with wand, pin button, and primary action">
-
-**Option-Tab**
-
-<img src="assets/window-switcher.png" width="700" alt="Searchable window switcher with sample application and window titles">
-
-**Calculator**
-
-<img src="assets/calculator.png" width="700" alt="One gigabyte per second converted to 8,000 Mbit/s">
-
-| My Schedule | Timers |
-| --- | --- |
-| <img src="assets/schedule.png" width="345" alt="Sample upcoming events with calendar colors"> | <img src="assets/timers.png" width="345" alt="Three named timers in dark mode"> |
-
-Screenshots use native views and sample schedule, timer, and window data.
-
-</details>
 
 ## Shortcuts
 
