@@ -6,11 +6,14 @@
   <key>CFBundleIdentifier</key>           <string>systems.wafer.switcharoo</string>
   <key>CFBundleName</key>                 <string>switcharoo</string>
   <key>CFBundleDisplayName</key>          <string>switcharoo</string>
+  <key>CFBundleIconFile</key>             <string>AppIcon</string>
   <key>CFBundlePackageType</key>          <string>APPL</string>
-  <key>CFBundleShortVersionString</key>   <string>0.1</string>
-  <key>CFBundleVersion</key>              <string>1</string>
+  <key>CFBundleShortVersionString</key>   <string>0.2</string>
+  <key>CFBundleVersion</key>              <string>2</string>
   <key>LSUIElement</key>                  <true/>
   <key>LSMinimumSystemVersion</key>       <string>14.0</string>
+  <key>NSCalendarsFullAccessUsageDescription</key><string>Switcharoo shows your schedule and meeting links from your macOS calendars.</string>
+  <key>NSAppleEventsUsageDescription</key><string>Switcharoo uses System Events to toggle macOS light and dark appearance when you run the command.</string>
   <key>NSHighResolutionCapable</key>      <true/>
   <key>CFBundleURLTypes</key>
   <array>

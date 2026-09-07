@@ -1,3 +1,5 @@
 switcharoo.app/
 *.swiftc
 .DS_Store
+
+.build/

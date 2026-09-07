@@ -176,6 +176,7 @@ struct WindowRecord {
     let appName: String
     let title: String
     let icon: NSImage?
+    var commandID: String? = nil
 }
 
 private func isSystemHelperPath(_ path: String) -> Bool {
@@ -332,6 +333,12 @@ func listWindows() -> [WindowRecord] {
         guard layer == 0, pid != 0, wid != 0 else { continue }
         if seenIDs.contains(wid) { continue }
         seenIDs.insert(wid)
+        if pid == ProcessInfo.processInfo.processIdentifier {
+            if let own = ToolWindowHost.shared.nativeWindow(wid) {
+                out.append(WindowRecord(windowID: wid,pid: pid,appName: "Switcharoo",title: own.title,icon: NSImage(systemSymbolName: "rectangle.on.rectangle",accessibilityDescription: nil)))
+            }
+            continue
+        }
         guard let ra = NSRunningApplication(processIdentifier: pid),
               ra.activationPolicy == .regular
         else { continue }
@@ -398,6 +405,9 @@ func zorderSnapshot() -> String {
 }
 
 func raise(_ w: WindowRecord) {
+    if w.pid == ProcessInfo.processInfo.processIdentifier, let own = ToolWindowHost.shared.nativeWindow(w.windowID) {
+        own.deminiaturize(nil); own.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return
+    }
     raiseGeneration += 1
     let gen = raiseGeneration
     let t0 = CACurrentMediaTime()
@@ -498,33 +508,75 @@ func filterWindows(_ rows: [WindowRecord], query: String) -> [WindowRecord] {
 }
 
 // MARK: - Theme ----------------------------------------------------------------
-// Pure white in light mode, pure black in dark mode. Text inverts.
+// Approved neutral switcher surfaces and selection colors.
 enum Theme {
     static var isDark: Bool {
         NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
-    static var bg: NSColor    { isDark ? .black : .white }
-    static var fg: NSColor    { isDark ? .white : .black }
-    static var dim: NSColor   { isDark ? NSColor(white: 1.0, alpha: 0.55)
-                                        : NSColor(white: 0.0, alpha: 0.55) }
-    static var muted: NSColor { isDark ? NSColor(white: 1.0, alpha: 0.35)
-                                        : NSColor(white: 0.0, alpha: 0.35) }
-    static var sel: NSColor   { isDark ? NSColor(white: 1.0, alpha: 0.12)
-                                        : NSColor(white: 0.0, alpha: 0.08) }
+    private static func gray(_ light: CGFloat,_ dark: CGFloat) -> NSColor { NSColor(white:(isDark ? dark : light)/255,alpha:1) }
+    static var bg: NSColor { gray(255,35) }
+    static var fg: NSColor { gray(35,237) }
+    static var dim: NSColor { gray(104,171) }
+    static var line: NSColor { gray(228,60) }
+    static var sel: NSColor { gray(237,56) }
 }
 
 // MARK: - Search field ---------------------------------------------------------
 // NSTextField subclass that tints the native caret to the theme foreground.
+class PersistentSearchCell: NSTextFieldCell {
+    private lazy var editor: NSTextView = {
+        let editor = SteadyCaretEditor()
+        editor.isFieldEditor = true
+        editor.textContainer?.lineFragmentPadding = 0
+        return editor
+    }()
+    override func fieldEditor(for controlView: NSView) -> NSTextView? { editor }
+}
+/// NSTextField otherwise draws its text at the top of our 30-point input slot,
+/// while its field editor uses another vertical origin for the caret.
+class CenteredSearchCell: PersistentSearchCell {
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        var result = super.drawingRect(forBounds:rect)
+        result.origin.x = rect.origin.x
+        result.size.width = rect.width
+        let height = min(result.height,cellSize(forBounds:rect).height)
+        result.origin.y += (result.height-height)/2
+        result.size.height = height
+        return result
+    }
+    override func select(withFrame rect: NSRect,in view: NSView,editor: NSText,delegate: Any?,start: Int,length: Int) {
+        super.select(withFrame:drawingRect(forBounds:rect),in:view,editor:editor,delegate:delegate,start:start,length:length)
+    }
+    override func edit(withFrame rect: NSRect,in view: NSView,editor: NSText,delegate: Any?,event: NSEvent?) {
+        super.edit(withFrame:drawingRect(forBounds:rect),in:view,editor:editor,delegate:delegate,event:event)
+    }
+}
+
+final class SteadyCaretEditor: NSTextView {
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        super.drawInsertionPoint(in:rect,color:color,turnedOn:true)
+    }
+}
 final class SearchField: NSTextField {
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
-        if ok, let editor = currentEditor() as? NSTextView {
-            editor.insertionPointColor = Theme.fg
-            editor.selectedTextAttributes = [
-                .backgroundColor: Theme.fg.withAlphaComponent(0.18)
-            ]
-        }
+        if ok { refreshEditorColors() }
         return ok
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshEditorColors()
+    }
+    private func refreshEditorColors() {
+        guard let editor = currentEditor() as? NSTextView else { return }
+        // Resolve against this field's window, including per-window appearances.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let color = NSColor.labelColor.usingColorSpace(.deviceRGB) ?? .labelColor
+            editor.insertionPointColor = color
+            editor.selectedTextAttributes = [.backgroundColor:color.withAlphaComponent(0.18)]
+        }
+        editor.needsDisplay = true
     }
 }
 
@@ -532,17 +584,18 @@ final class SearchField: NSTextField {
 final class SwitcherView: NSView {
     // Layout constants — change here to scale the whole UI. A future version
     // will read these from a config file.
-    let panelWidth: CGFloat = 720
+    let panelWidth = SwitcharooSearchMetrics.panelWidth
     let rowHeight: CGFloat = 36
     let pad: CGFloat = 14
-    private let baseSearchHeight: CGFloat = 60
+    private let baseSearchHeight = SwitcharooSearchMetrics.rowHeight
     /// Effective search-bar height. In quick mode the search bar is hidden
     /// entirely so the panel collapses up against the rows.
     var searchHeight: CGFloat { quickMode ? 0 : baseSearchHeight }
-    let appColumnWidth: CGFloat = 130
-    let iconSize: CGFloat = 22
+    let appColumnWidth: CGFloat = 138
+    let horizontalPad: CGFloat = 10
+    let iconSize: CGFloat = 20
     let textFontSize: CGFloat = 14
-    let searchFontSize: CGFloat = 20
+    let searchFontSize = SwitcharooSearchMetrics.fontSize
 
     var rows: [WindowRecord] = []
     var selected: Int = 0
@@ -601,18 +654,17 @@ final class SwitcherView: NSView {
     }
 
     private func configureSearchField() {
+        searchField.cell = CenteredSearchCell(textCell: "")
+        searchField.isEditable = true
+        searchField.isSelectable = true
         searchField.isBordered = false
         searchField.drawsBackground = false
         searchField.focusRingType = .none
         searchField.usesSingleLineMode = true
         searchField.cell?.wraps = false
         searchField.cell?.isScrollable = true
-        searchField.font = .systemFont(ofSize: searchFontSize, weight: .regular)
+        searchField.font = SwitcharooSearchMetrics.font
         searchField.textColor = Theme.fg
-        // Typed text is always left-aligned; placeholder is centered via the
-        // paragraphStyle baked into its attributes (NSTextField's placeholder
-        // ignores the field's `alignment` property when a placeholderAttributed
-        // String is set).
         searchField.alignment = .left
         refreshThemeColors()
         addSubview(searchField)
@@ -626,23 +678,16 @@ final class SwitcherView: NSView {
     /// show().
     func refreshThemeColors() {
         searchField.textColor = Theme.fg
-        let centerPara = NSMutableParagraphStyle()
-        centerPara.alignment = .center
-        searchField.placeholderAttributedString = NSAttributedString(
-            string: "switcharoo",
-            attributes: [
-                .foregroundColor: Theme.muted,
-                .font: NSFont.systemFont(ofSize: searchFontSize, weight: .regular),
-                .paragraphStyle: centerPara,
-            ])
+        searchField.placeholderAttributedString = nil
+        searchField.placeholderString = ""
     }
 
     private func layoutSearchField() {
-        let h: CGFloat = 30
+        let h = SwitcharooSearchMetrics.fieldHeight
         searchField.frame = NSRect(
-            x: pad + 4,
+            x: SwitcharooSearchMetrics.leading,
             y: (searchHeight - h) / 2,
-            width: bounds.width - 2 * (pad + 4),
+            width: bounds.width - SwitcharooSearchMetrics.leading - SwitcharooSearchMetrics.trailing,
             height: h)
     }
 
@@ -684,8 +729,10 @@ final class SwitcherView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         Theme.bg.setFill()
-        let path = NSBezierPath(roundedRect: bounds, xRadius: 14, yRadius: 14)
+        let path = NSBezierPath(roundedRect: bounds, xRadius: 21, yRadius: 21)
         path.fill()
+        Theme.line.setStroke()
+        NSBezierPath(roundedRect:bounds.insetBy(dx:0.5,dy:0.5),xRadius:20.5,yRadius:20.5).stroke()
 
         // If the panel collapsed to just the search bar, don't draw a divider
         // or any list area.
@@ -695,13 +742,13 @@ final class SwitcherView: NSView {
         // Divider between search bar and rows. In quick mode the search bar
         // is hidden (searchHeight == 0) so there's nothing to divide.
         if searchHeight > 0 {
-            Theme.muted.withAlphaComponent(0.18).setFill()
+            Theme.line.setFill()
             NSRect(x: 0, y: searchHeight, width: bounds.width, height: 1).fill()
         }
 
         if rows.isEmpty, let msg = emptyMessage {
             let emptyAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: textFontSize),
+                .font: SwitcharooTypography.font(size: textFontSize),
                 .foregroundColor: Theme.dim,
             ]
             (msg as NSString).draw(at: NSPoint(x: pad + 4, y: searchHeight + 14),
@@ -710,13 +757,13 @@ final class SwitcherView: NSView {
         }
 
         // Layout: [right-aligned app name | icon | left-aligned title]
-        let appColRight = pad + 12 + appColumnWidth
+        let appColRight = horizontalPad + 16 + appColumnWidth
         let iconX = appColRight + 14
-        let titleX = iconX + iconSize + 12
-        let textY: CGFloat = (rowHeight - 18) / 2
+        let titleX = iconX + iconSize + 14
+        let lineHeight = NSAttributedString(string:"Ag",attributes:[.font:SwitcharooTypography.font(size:textFontSize)]).size().height
+        let textY = (rowHeight - lineHeight) / 2
 
-        // All regular weight; title now uses the same fg color as the app
-        // name (was dim). Match emphasis = underline only.
+        // Regular Inter; app names are secondary unless selected. Matches underline.
         let nameParaStyle = NSMutableParagraphStyle()
         nameParaStyle.alignment = .right
         nameParaStyle.lineBreakMode = .byTruncatingTail
@@ -726,7 +773,7 @@ final class SwitcherView: NSView {
         titleParaStyle.lineBreakMode = .byTruncatingTail
 
         let nameBase: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: textFontSize),
+            .font: SwitcharooTypography.font(size: textFontSize),
             .foregroundColor: Theme.fg,
             .paragraphStyle: nameParaStyle,
         ]
@@ -735,7 +782,7 @@ final class SwitcherView: NSView {
             .underlineColor: Theme.fg.withAlphaComponent(0.5),
         ]
         let titleBase: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: textFontSize),
+            .font: SwitcharooTypography.font(size: textFontSize),
             .foregroundColor: Theme.fg,
             .paragraphStyle: titleParaStyle,
         ]
@@ -746,31 +793,33 @@ final class SwitcherView: NSView {
 
         // Right padding inside each row (mirrors the pad + 12 on the left of
         // the app column, so left/right gutters look equal).
-        let rightInset: CGFloat = 12
+        let rightInset: CGFloat = 16
 
         let now = CACurrentMediaTime()
         for (i, r) in rows.enumerated() {
             let y = searchHeight + pad + CGFloat(i) * rowHeight
-            let row = NSRect(x: pad, y: y, width: bounds.width - 2*pad, height: rowHeight)
+            let row = NSRect(x: horizontalPad, y: y, width: bounds.width - 2*horizontalPad, height: rowHeight)
             if i == selected {
                 Theme.sel.setFill()
-                NSBezierPath(roundedRect: row.insetBy(dx: 0, dy: 2),
-                             xRadius: 8, yRadius: 8).fill()
+                NSBezierPath(roundedRect: row,
+                             xRadius: 10, yRadius: 10).fill()
             }
             // Zlip flash on live title change. Alpha eases from ~0.18 → 0.
             if let until = rowFlashUntil[r.windowID], until > now {
                 let remaining = until - now
                 let alpha = 0.18 * (remaining / flashDuration)
                 Theme.fg.withAlphaComponent(alpha).setFill()
-                NSBezierPath(roundedRect: row.insetBy(dx: 0, dy: 2),
-                             xRadius: 8, yRadius: 8).fill()
+                NSBezierPath(roundedRect: row,
+                             xRadius: 10, yRadius: 10).fill()
             }
             // App name — right-aligned in its column, ellipsis-truncated if
             // longer than the column.
-            let nameAttr = highlighted(r.appName, base: nameBase, match: nameMatch)
+            var rowNameBase = nameBase
+            rowNameBase[.foregroundColor] = i == selected ? Theme.fg : Theme.dim
+            let nameAttr = highlighted(r.appName, base: rowNameBase, match: nameMatch)
             let nameRect = NSRect(
-                x: pad + 12, y: y + textY,
-                width: appColumnWidth, height: rowHeight)
+                x: horizontalPad + 16, y: y + textY,
+                width: appColumnWidth, height: lineHeight)
             nameAttr.draw(in: nameRect)
 
             // Icon
@@ -787,7 +836,7 @@ final class SwitcherView: NSView {
             let titleAttr = highlighted(r.title, base: titleBase, match: titleMatch)
             let titleRect = NSRect(
                 x: titleX, y: y + textY,
-                width: row.maxX - rightInset - titleX, height: rowHeight)
+                width: row.maxX - rightInset - titleX, height: lineHeight)
             titleAttr.draw(in: titleRect)
         }
     }
@@ -802,6 +851,8 @@ final class SwitcherPanel: NSPanel {
     /// defaults (miniaturize) and NSApplication defaults (Hide Application)
     /// can otherwise swallow these before our main-menu items see them.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let recorder = firstResponder as? WMRecorderButton,recorder.recording { recorder.keyDown(with:event); return true }
+        if AppShortcuts.shared.matches(.settings,event:event) { (NSApp.delegate as? App)?.openPrefs(nil); return true }
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard let app = NSApp.delegate as? App else {
             return super.performKeyEquivalent(with: event)
@@ -920,12 +971,17 @@ func installCmdTabTap() {
             return Unmanaged.passUnretained(event)
         }
         guard type == .keyDown else { return Unmanaged.passUnretained(event) }
-        let kc = event.getIntegerValueField(.keyboardEventKeycode)
-        guard kc == Int64(kVK_Tab),
-              event.flags.contains(.maskCommand) else {
-            return Unmanaged.passUnretained(event)
+        if AppShortcuts.shared.capturingKeys {
+            // Deliver recording keystrokes before macOS consumes Cmd-Tab/Space.
+            if let copy = event.copy() {
+                DispatchQueue.main.async {
+                    guard let recorder = NSApp.keyWindow?.firstResponder as? WMRecorderButton,recorder.recording,let key = NSEvent(cgEvent:copy) else { return }
+                    recorder.keyDown(with:key)
+                }
+            }
+            return nil
         }
-        let shift = event.flags.contains(.maskShift)
+        guard let shift = AppShortcuts.shared.quickDirection(event) else { return Unmanaged.passUnretained(event) }
         let id: UInt32 = shift ? HK_QUICK_REVERSE : HK_QUICK_FORWARD
         DispatchQueue.main.async {
             NotificationCenter.default.post(
@@ -983,9 +1039,14 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var allRows: [WindowRecord] = []
     var rows: [WindowRecord] = []
     var selected: Int = 0
+    let previousFocus = LauncherFocus()
     var quickMode: Bool = false       // true → "release Cmd to commit" flow
     var modifierMonitor: Any?
     var keyMonitor: Any?
+    private var searchHotkeys: [EventHotKeyRef] = []
+    private(set) var searchShortcutIssue: String?
+    private var settingsMenuItem: NSMenuItem?
+    private var launcherMenuItem: NSMenuItem?
     /// Polls AX titles while the panel is visible so e.g. Spotify track
     /// changes appear live in the row without dismissing/reopening.
     var liveRefreshTimer: Timer?
@@ -1018,18 +1079,86 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             case "snap":  snapPanel()
             case "login-on":  setLaunchAtLogin(true)
             case "login-off": setLaunchAtLogin(false)
-            default:      break
+            default:      WindowManager.shared.handleURL(url)
             }
         }
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        SwitcharooAppearance.saved.apply()
+        if CommandLine.arguments.contains("--readme-preview") {
+            LauncherDiagnostics.renderReadme(); return
+        }
+        if CommandLine.arguments.contains("--focus-handoff-regression") {
+            installMenu(); buildPanel(); LauncherController.shared.runHandoffRegression(app:self); return
+        }
+        if CommandLine.arguments.contains("--launcher-responsiveness") {
+            installMenu(); buildPanel(); LauncherController.shared.runResponsiveness(); return
+        }
+        if CommandLine.arguments.contains("--focus-regression") {
+            installMenu(); buildPanel(); LauncherController.shared.runFocusRegression(app:self); return
+        }
+        if CommandLine.arguments.contains("--launcher-benchmark") {
+            installMenu(); buildPanel(); LauncherDiagnostics.renderSwitcherModes()
+            LauncherController.shared.show(preview:true)
+            for index in 1...6 {
+                DispatchQueue.main.asyncAfter(deadline:.now()+Double(index)*0.15) {
+                    LauncherController.shared.dismiss(); LauncherController.shared.show(preview:true)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline:.now()+1.0) { LauncherController.shared.snapshot(to:URL(fileURLWithPath:"/tmp/switcharoo-launcher-benchmark.png"),dark:false) }
+            DispatchQueue.main.asyncAfter(deadline:.now()+1.6) { NSApp.terminate(nil) }
+            return
+        }
+        if CommandLine.arguments.contains("--launcher-demo") || CommandLine.arguments.contains("--launcher-preview") {
+            installMenu(); buildPanel(); LauncherController.shared.show(CommandLine.arguments.contains("--calculator-preview") ? .calculator : .search,preview: true)
+            if CommandLine.arguments.contains("--interaction-preview") { LauncherController.shared.previewInteractions(); return }
+            if CommandLine.arguments.contains("--anchor-preview") { LauncherController.shared.previewAnchoring(); return }
+            if CommandLine.arguments.contains("--launcher-preview") {
+                LauncherController.shared.snapshot(to: URL(fileURLWithPath: "/tmp/switcharoo-launcher-light.png"),dark: false)
+                DispatchQueue.main.asyncAfter(deadline: .now()+1) { LauncherController.shared.snapshot(to: URL(fileURLWithPath: "/tmp/switcharoo-launcher-dark.png"),dark: true) }
+                DispatchQueue.main.asyncAfter(deadline: .now()+2) { LauncherController.shared.model.navigate(.timers); LauncherController.shared.snapshot(to: URL(fileURLWithPath: "/tmp/switcharoo-modal-timers.png"),dark: true) }
+                DispatchQueue.main.asyncAfter(deadline: .now()+3) { LauncherController.shared.model.navigate(.schedule); LauncherController.shared.snapshot(to: URL(fileURLWithPath: "/tmp/switcharoo-modal-schedule.png"),dark: true) }
+                DispatchQueue.main.asyncAfter(deadline: .now()+4) { NSApp.terminate(nil) }
+            }
+            return
+        }
+        if CommandLine.arguments.contains("--wm-smoke-test") { WindowDiagnostics.shared.run(); return }
+        if CommandLine.arguments.contains("--tools-preview") {
+            ToolWindowHost.shared.snapshot(.schedule,to: URL(fileURLWithPath: "/tmp/switcharoo-schedule-light.png"),dark: false)
+            DispatchQueue.main.asyncAfter(deadline: .now()+1) { ToolWindowHost.shared.snapshot(.schedule,to: URL(fileURLWithPath: "/tmp/switcharoo-schedule-dark.png"),dark: true) }
+            DispatchQueue.main.asyncAfter(deadline: .now()+2) { ToolWindowHost.shared.snapshot(.timer,to: URL(fileURLWithPath: "/tmp/switcharoo-timers-light.png"),dark: false) }
+            DispatchQueue.main.asyncAfter(deadline: .now()+3) { ToolWindowHost.shared.snapshot(.timer,to: URL(fileURLWithPath: "/tmp/switcharoo-timers-dark.png"),dark: true) }
+            DispatchQueue.main.asyncAfter(deadline: .now()+4) { NSApp.terminate(nil) }
+            return
+        }
+        if CommandLine.arguments.contains("--timers-ui-test") {
+            installMenu(); ToolWindowHost.shared.show(.timer,preview: true)
+            DispatchQueue.main.asyncAfter(deadline: .now()+90) { NSApp.terminate(nil) }
+            return
+        }
+        if CommandLine.arguments.contains("--tools-only") {
+            installMenu(); ToolWindowHost.shared.show(.schedule); return
+        }
+        if CommandLine.arguments.contains("--wm-preview") {
+            WMPreferencesController.shared.snapshot(to: URL(fileURLWithPath: "/tmp/switcharoo-preferences-light.png"),dark: false)
+            DispatchQueue.main.asyncAfter(deadline: .now()+1) {
+                WMPreferencesController.shared.snapshot(to: URL(fileURLWithPath: "/tmp/switcharoo-preferences-dark.png"),dark: true)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now()+2) { NSApp.terminate(nil) }
+            return
+        }
         ActivationMRU.shared.start()
         promptAX()
         installMenu()
         buildPanel()
         installHotkeys()
         installCmdTabTap()
+        WindowManager.shared.start()
+        LauncherController.shared.start()
+        AppShortcuts.shared.start()
+        updateShortcutMenu()
+        _ = CountdownModel.shared
 
         NotificationCenter.default.addObserver(
             forName: .switcharooHotkey, object: nil, queue: .main
@@ -1056,7 +1185,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         modifierMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] ev in
             guard let self else { return ev }
             if self.panel.isVisible && self.quickMode
-                && !ev.modifierFlags.contains(.command) {
+                && !AppShortcuts.shared.quickModifierHeld(ev.modifierFlags) {
                 self.commit()
             }
             return ev
@@ -1068,7 +1197,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         // Returning nil swallows the event so Ctrl+J doesn't insert a newline
         // into the search field.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] ev in
-            guard let self, self.panel.isVisible,
+            guard let self else { return ev }
+            if AppShortcuts.shared.recording { return ev }
+            if NSApp.keyWindow != nil,AppShortcuts.shared.matches(.settings,event:ev) { self.openPrefs(nil); return nil }
+            guard self.panel.isVisible,
                   ev.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control
             else { return ev }
             switch ev.charactersIgnoringModifiers {
@@ -1090,10 +1222,13 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
         let appMenu = NSMenu()
-        let prefs = NSMenuItem(title: "Preferences…",
+        let launcher = NSMenuItem(title: "Open Switcharoo",action: #selector(openLauncher(_:)),keyEquivalent: " ")
+        launcher.keyEquivalentModifierMask = [.option,.command]
+        launcher.target = self; launcherMenuItem = launcher; appMenu.addItem(launcher)
+        let prefs = NSMenuItem(title: "Settings…",
                                action: #selector(openPrefs(_:)),
                                keyEquivalent: ",")
-        prefs.target = self
+        prefs.target = self; settingsMenuItem = prefs
         appMenu.addItem(prefs)
         let launch = NSMenuItem(title: "Launch at Login",
                                 action: #selector(toggleLaunchAtLogin(_:)),
@@ -1130,6 +1265,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let winItem = NSMenuItem()
         mainMenu.addItem(winItem)
         let winMenu = NSMenu(title: "Actions")
+        winMenu.addItem(withTitle: "Close Window",action: #selector(NSWindow.performClose(_:)),keyEquivalent: "w")
+        let fullscreen = NSMenuItem(title: "Toggle Full Screen",action: #selector(NSWindow.toggleFullScreen(_:)),keyEquivalent: "f")
+        fullscreen.keyEquivalentModifierMask = [.control,.command]; winMenu.addItem(fullscreen)
         let minItem = NSMenuItem(title: "Minimize Highlighted",
                                  action: #selector(minimizeHighlighted(_:)),
                                  keyEquivalent: "m")
@@ -1160,7 +1298,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     private func selectedRecord() -> WindowRecord? {
-        guard selected < rows.count else { return nil }
+        guard selected >= 0, selected < rows.count, rows[selected].commandID == nil else { return nil }
         return rows[selected]
     }
 
@@ -1194,19 +1332,25 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     @objc func minimizeHighlighted(_ sender: Any?) {
-        guard let r = selectedRecord(), let win = axWindowFor(r) else { return }
+        guard panel?.isVisible == true else { NSApp.keyWindow?.miniaturize(nil); return }
+        guard let r = selectedRecord() else { return }
+        if r.pid == ProcessInfo.processInfo.processIdentifier,let own = ToolWindowHost.shared.nativeWindow(r.windowID) {
+            own.miniaturize(nil); markDismissed(r.windowID); keepPanelOpen(); refresh(); return
+        }
+        guard let win = axWindowFor(r) else { return }
         AXUIElementSetAttributeValue(win, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
         markDismissed(r.windowID)
         keepPanelOpen()
         refresh()
     }
 
-    @objc func openPrefs(_ sender: Any?) {
-        PreferencesController.shared.show()
-    }
+    @objc func openPrefs(_ sender: Any?) { LauncherController.shared.showSettings() }
+    @objc func openLauncher(_ sender: Any?) { LauncherController.shared.toggle() }
 
     @objc func handleQuit(_ sender: Any?) {
-        if panel.isVisible, let r = selectedRecord() {
+        if panel?.isVisible == true, selectedRecord() == nil { return }
+        if panel?.isVisible == true, let r = selectedRecord() {
+            if r.pid == ProcessInfo.processInfo.processIdentifier,let own = ToolWindowHost.shared.nativeWindow(r.windowID) { own.close(); keepPanelOpen(); refresh(); return }
             markTerminating(r.pid)
             _ = NSRunningApplication(processIdentifier: r.pid)?.terminate()
             keepPanelOpen()
@@ -1247,6 +1391,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     @objc func hideHighlighted(_ sender: Any?) {
+        guard panel?.isVisible == true else { NSApp.hide(nil); return }
         guard let r = selectedRecord() else { return }
         // Hide affects the entire app — mark every window for that pid.
         for wid in allRows.filter({ $0.pid == r.pid }).map(\.windowID) {
@@ -1258,7 +1403,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     @objc func forceQuitHighlighted(_ sender: Any?) {
+        guard panel?.isVisible == true else { return }
         guard let r = selectedRecord() else { return }
+        if r.pid == ProcessInfo.processInfo.processIdentifier,let own = ToolWindowHost.shared.nativeWindow(r.windowID) { own.close(); keepPanelOpen(); refresh(); return }
         markTerminating(r.pid)
         _ = NSRunningApplication(processIdentifier: r.pid)?.forceTerminate()
         keepPanelOpen()
@@ -1280,6 +1427,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     /// Re-fetch windows and re-apply the current query. Used after a window
     /// management action so the list reflects the new state.
     private func refresh() {
+        if view.searchField.stringValue.hasPrefix(">") { applyQuery(view.searchField.stringValue); return }
         let raw = listWindows().filter { !terminatingPids.contains($0.pid) }
         allRows = sortDismissedToBottom(raw)
         let q = view.searchField.stringValue
@@ -1357,6 +1505,12 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func show(startReversed: Bool, quick: Bool = false) {
+        if !panel.isVisible {
+            let launcher = LauncherController.shared
+            if launcher.isVisible { previousFocus.inherit(from:launcher.previousFocus) }
+            else { previousFocus.capture(fallbackPID:WindowManager.shared.lastExternalPID) }
+        }
+        LauncherController.shared.dismiss()
         quickMode = quick
         view.quickMode = quick
         view.refreshThemeColors()
@@ -1403,7 +1557,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         // user can release Cmd between the CGEventTap intercept and this
         // method actually running. The flagsChanged monitor missed the event
         // because the panel wasn't visible yet — catch it here.
-        if quick && !NSEvent.modifierFlags.contains(.command) {
+        if quick && !AppShortcuts.shared.quickModifierHeld(NSEvent.modifierFlags) {
             commit()
             return
         }
@@ -1429,11 +1583,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     private func refreshLiveTitles() {
-        guard panel.isVisible, !rows.isEmpty else { return }
+        guard !view.searchField.stringValue.hasPrefix(">"), panel.isVisible, !rows.isEmpty else { return }
         var newRows = rows
         var changed = false
         // Group by pid so we only do one kAXWindowsAttribute fetch per app.
-        for pid in Set(rows.map(\.pid)) {
+        for pid in Set(rows.map(\.pid)) where pid != ProcessInfo.processInfo.processIdentifier {
             guard let wins = axQueryWindows(pid).windows else { continue }
             for (axWin, wid) in wins {
                 guard let idx = newRows.firstIndex(where: { $0.windowID == wid }) else { continue }
@@ -1494,10 +1648,24 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     /// so there is no fade and no preference to turn one on.
     func dismissPanel() {
         stopLiveRefresh()
+        quickMode = false
+        selected = -1
+        view.selected = -1
+        rows = []; allRows = []; view.rows = []
+        view.query = ""; view.searchField.stringValue = ""
         panel.orderOut(nil)
     }
 
     func commit() {
+        // Late key/field-editor callbacks must never activate an abandoned row.
+        guard panel.isVisible,selected >= 0,selected < rows.count else { return }
+        if selected >= 0, selected < rows.count, let id = rows[selected].commandID {
+            if id.hasPrefix("tool:") {
+                dismissPanel()
+                DispatchQueue.main.async { WindowManager.shared.executeAction(id) }
+            } else { WindowManager.shared.executeAction(id); dismissPanel() }
+            return
+        }
         let pick = (selected < rows.count) ? rows[selected] : nil
         let pickDesc = pick.map { "\($0.appName) wid=\($0.windowID) \"\($0.title)\"" }
             ?? "**none**"
@@ -1526,9 +1694,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func cancel() {
+        guard panel.isVisible else { return }
         switcharooLog("cancel: panel cancelled (Esc / cancelOperation)")
         dismissPanel()
-        NSApp.hide(nil)
+        if previousFocus.applicationPID != nil { previousFocus.restore() }
+        else { NSApp.hide(nil) }
     }
 
     /// Show the panel, then render its content view to /tmp/switcharoo-ui.png.
@@ -1548,7 +1718,15 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func applyQuery(_ q: String) {
-        let filtered = filterWindows(allRows, query: q)
+        let filtered: [WindowRecord]
+        if q.hasPrefix(">") {
+            let term = String(q.dropFirst()).trimmingCharacters(in: .whitespaces).lowercased()
+            let manager = WindowManager.shared
+            var actions = SwitcharooTool.allCases.filter { term.isEmpty || $0.keywords.contains(term) }.map { ("tool:\($0.id)",$0.title) }
+            actions += manager.configuration.commands.filter { $0.enabled && (term.isEmpty || ($0.name + " " + $0.alias).lowercased().contains(term)) }.map { ($0.id,$0.name) }
+            actions += manager.configuration.scenes.filter { term.isEmpty || $0.name.lowercased().contains(term) }.map { ("scene:\($0.id.uuidString)",$0.name) }
+            filtered = actions.map { WindowRecord(windowID: 0,pid: ProcessInfo.processInfo.processIdentifier,appName: "Window",title: $0.1,icon: NSImage(systemSymbolName: "rectangle.split.2x1",accessibilityDescription: nil),commandID: $0.0) }
+        } else { filtered = filterWindows(allRows, query: q) }
         rows = Array(filtered.prefix(DISPLAY_LIMIT))
         selected = 0
         view.query = q
@@ -1621,7 +1799,6 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func installHotkeys() {
-        let sig: OSType = 0x5357524F // 'SWRO'
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(
@@ -1632,6 +1809,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
                     evt, EventParamName(kEventParamDirectObject),
                     EventParamType(typeEventHotKeyID), nil,
                     MemoryLayout<EventHotKeyID>.size, nil, &hkid)
+                guard r == noErr, hkid.signature == 0x5357524F else { return OSStatus(eventNotHandledErr) }
                 if r == noErr {
                     DispatchQueue.main.async {
                         NotificationCenter.default.post(
@@ -1643,27 +1821,48 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
             },
             1, &spec, nil, nil)
 
-        // Search mode: Opt+Tab forward, Opt+Shift+Tab reverse.
-        let searchMods = UInt32(optionKey)
-        var ref: EventHotKeyRef?
-        RegisterEventHotKey(
-            UInt32(kVK_Tab), searchMods,
-            EventHotKeyID(signature: sig, id: HK_FORWARD),
-            GetApplicationEventTarget(), 0, &ref)
-        var refR: EventHotKeyRef?
-        RegisterEventHotKey(
-            UInt32(kVK_Tab), searchMods | UInt32(shiftKey),
-            EventHotKeyID(signature: sig, id: HK_REVERSE),
-            GetApplicationEventTarget(), 0, &refR)
-
-        // Quick mode (Cmd-Tab-style) is now wired via CGEventTap, not Carbon
-        // — see installCmdTabTap(). The tap intercepts Cmd+Tab itself.
+        _ = registerSearchShortcuts()
+    }
+    func suspendSearchShortcuts() {
+        searchHotkeys.forEach { UnregisterEventHotKey($0) }; searchHotkeys = []
+    }
+    @discardableResult func registerSearchShortcuts() -> String? {
+        suspendSearchShortcuts(); searchShortcutIssue = nil
+        let key = AppShortcuts.shared.configuration[.search]
+        for (id,shortcut) in [(HK_FORWARD,key),(HK_REVERSE,AppShortcutConfiguration.reversed(key))] {
+            var ref: EventHotKeyRef?
+            let status = RegisterEventHotKey(shortcut.keyCode,shortcut.modifiers,EventHotKeyID(signature:0x5357524F,id:id),GetApplicationEventTarget(),OptionBits(kEventHotKeyExclusive),&ref)
+            guard status == noErr,let ref else { suspendSearchShortcuts(); searchShortcutIssue = "Window Search: shortcut is in use (\(status))."; return searchShortcutIssue }
+            searchHotkeys.append(ref)
+        }
+        switcharooLog("search: shortcut=\(WMRecorderButton.label(key)) registered=true")
+        return nil
+    }
+    func updateShortcutMenu() {
+        for (id,item) in [(AppShortcutID.settings,settingsMenuItem),(AppShortcutID.launcher,launcherMenuItem)] {
+            guard let item else { continue }
+            let key = AppShortcuts.shared.configuration[id]
+            let name = WMRecorderButton.label(.init(keyCode:key.keyCode,modifiers:0))
+            item.keyEquivalent = ["Space":" ","⇥":"\t","↩":"\r"][name] ?? (name.count == 1 ? name.lowercased() : "")
+            var flags: NSEvent.ModifierFlags = []
+            if key.modifiers & 256 != 0 { flags.insert(.command) }
+            if key.modifiers & 512 != 0 { flags.insert(.shift) }
+            if key.modifiers & 2048 != 0 { flags.insert(.option) }
+            if key.modifiers & 4096 != 0 { flags.insert(.control) }
+            item.keyEquivalentModifierMask = flags
+        }
     }
 }
 
 // MARK: - Bootstrap ------------------------------------------------------------
-let nsApp = NSApplication.shared
-let delegate = App()
-nsApp.delegate = delegate
-nsApp.setActivationPolicy(.accessory)
-nsApp.run()
+@main
+struct SwitcharooMain {
+    static func main() {
+        if CommandLine.arguments.contains("--calculator-worker") { CalculatorWorker.run(); return }
+        let nsApp = NSApplication.shared
+        let delegate = App()
+        nsApp.delegate = delegate
+        nsApp.setActivationPolicy(.accessory)
+        withExtendedLifetime(delegate) { nsApp.run() }
+    }
+}

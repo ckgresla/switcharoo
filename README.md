@@ -1,38 +1,66 @@
-# switcharoo
+# Switcharoo
 
-A "really good" macOS window switcher.
+<img src="Resources/AppIcon.png" width="80" height="80" alt="Switcharoo kangaroo logo">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/switcharoo-dark.png">
-  <img alt="the switcharoo panel" src="assets/switcharoo-light.png" width="720">
-</picture>
+A tasteful replacement for cmd+tab & cmd+space on macOS. Native Swift, AppKit, and SwiftUI.
 
-Single Swift file, no dependencies, no Xcode project. Window lists are
-MRU-ordered; titles update live while the panel is open.
+<img src="assets/launcher.png" width="700" alt="Switcharoo launcher finding and opening Finder">
 
-## keys
+## Features
 
-| key | action |
+- **Switch windows:** Command-Tab quick switching; Option-Tab searchable windows. Minimize, hide, or quit from the keyboard.
+- **Launch apps and URLs:** app icons, learned rankings, optional pins, and contextual actions. URLs open in your default browser.
+- **Arrange windows:** 40 placements and actions, multiple displays, custom sizes, gaps, saved layouts, undo/redo, and editable shortcuts.
+- **Calculate:** natural-language math, units, bandwidth, dates, time zones, currency rates, CSS colors, and history. Enter copies the answer and closes the launcher. A graph workspace plots up to six functions.
+- **My Schedule:** upcoming calendar events, calendar colors, search, and meeting links.
+- **Timers:** multiple named timers, pause/resume, saved countdowns, and notifications.
+- **Make it yours:** compact/open modes, remembered placement, alignment guides and snapping, light/dark/system appearance, and Inter when installed.
+
+<details>
+<summary>Screenshots</summary>
+
+**Compact launcher**
+
+<img src="assets/launcher-compact.png" width="700" alt="Compact two-row launcher with wand, pin button, and primary action">
+
+**Option-Tab**
+
+<img src="assets/window-switcher.png" width="700" alt="Searchable window switcher with sample application and window titles">
+
+**Calculator**
+
+<img src="assets/calculator.png" width="700" alt="One gigabyte per second converted to 8,000 Mbit/s">
+
+| My Schedule | Timers |
 | --- | --- |
-| `Cmd+Tab` / `Cmd+Shift+Tab` | quick mode — release Cmd to switch |
-| `Opt+Tab` / `Opt+Shift+Tab` | search mode — type to filter |
-| `Up`/`Down` · `Ctrl+K`/`Ctrl+J` · `Tab` | move selection |
-| `Enter` / `Esc` | switch / cancel |
-| `Cmd+M` · `Cmd+H` · `Cmd+Q` · `Cmd+Opt+Q` | minimize · hide · quit · force-quit the highlighted app |
+| <img src="assets/schedule.png" width="345" alt="Sample upcoming events with calendar colors"> | <img src="assets/timers.png" width="345" alt="Three named timers in dark mode"> |
 
-URL scheme for Raycast/Alfred/scripts: `switcharoo://show`, `switcharoo://quick`,
-`switcharoo://snap` (renders the panel to `/tmp/switcharoo-ui.png`),
-`switcharoo://login-on` / `switcharoo://login-off` (launch at login).
+Screenshots use native views and sample schedule, timer, and window data.
 
-## build
+</details>
+
+## Shortcuts
+
+| Key | Action |
+| --- | --- |
+| ⌥⌘Space | Launcher (configurable) |
+| ⌘Tab / ⌥Tab | Quick switch / search windows |
+| ↑ ↓ / Enter / Escape | Select / open / cancel |
+| ⌘K | Contextual actions |
+| ⌘, | Settings |
+
+## Build
+
+macOS 14+, Swift command-line tools, and Accessibility permission. Calendar and notification access are requested when needed.
 
 ```sh
-./setup-dev-cert.sh   # once — stable self-signed identity, so the
-                      # Accessibility grant survives rebuilds
-./build.sh            # compile, sign, install to /Applications, relaunch
+./setup-dev-cert.sh      # once; preserves Accessibility trust across builds
+./fetch-calculator-sdk.sh
+./build.sh --install
 ```
 
-Requires macOS 14+ and the Accessibility permission (prompted on first
-launch). Cmd+Tab interception starts as soon as the grant lands.
+For a build without installing, use `./build.sh --build-only`. Verify with `./test.sh` and `./test-calculator.sh` after building.
 
-MIT.
+The calculator uses proprietary SoulverCore: personal/private builds are permitted under its terms; distribution requires an appropriate vendor license. Switcharoo's source is MIT. See [third-party notices](THIRD_PARTY_NOTICES.md).
+
+[Usage and configuration](docs/REFERENCE.md) · [Calculator coverage and limits](CALCULATOR_PARITY.md)
