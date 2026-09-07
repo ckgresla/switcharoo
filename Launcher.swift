@@ -732,7 +732,7 @@ struct LauncherView: View {
             VStack(spacing:0) {
                 LauncherDragArea().frame(height:10)
                 LauncherSearchField(text:$model.query,focusGeneration:model.focusGeneration,move:move,submit:{ modifiers in
-                    if modifiers.contains(.command),calculator.hasContent { calculator.copy(raw:!modifiers.contains(.shift),includeQuery:modifiers.contains(.shift)) }
+                    if modifiers.contains(.command),calculator.hasContent { copyCalculationAndDismiss(raw:!modifiers.contains(.shift),includeQuery:modifiers.contains(.shift)) }
                     else if let event = NSApp.currentEvent,model.handleShortcut(event) { }
                     else { chooseSelected() }
                 },escape:exitSearch).frame(height:SwitcharooSearchMetrics.fieldHeight).padding(.leading,SwitcharooSearchMetrics.leading).padding(.trailing,SwitcharooSearchMetrics.trailing)
@@ -770,8 +770,13 @@ struct LauncherView: View {
             LauncherDragArea().frame(maxWidth:.infinity,maxHeight:.infinity)
         }.padding(.horizontal,18).frame(height: 54)
     }
+    private func copyCalculationAndDismiss(raw: Bool = false,includeQuery: Bool = false) {
+        guard calculator.canCopy else { return }
+        calculator.copy(raw:raw,includeQuery:includeQuery)
+        LauncherController.shared.dismiss(restoreFocus:true)
+    }
     private func chooseSelected() {
-        if calculator.hasContent { calculator.copy(); return }
+        if calculator.hasContent { copyCalculationAndDismiss(); return }
         if !model.showingCommands && model.query.isEmpty { model.showingCommands = true; model.selectedID = results.first?.id ?? ""; LauncherController.shared.resize(); return }
         if let result = results.first(where: { $0.id == model.selectedID }) ?? results.first { model.choose(result) }
     }
