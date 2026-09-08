@@ -79,7 +79,8 @@ private let launcherPreferences = LauncherPreferences(defaults:
     CommandLine.arguments.contains("--launcher-demo") || CommandLine.arguments.contains("--launcher-preview") || CommandLine.arguments.contains("--focus-regression") || CommandLine.arguments.contains("--readme-preview")
     ? UserDefaults(suiteName:"switcharoo.launcher-preview")! : .standard)
 final class LauncherModel: ObservableObject {
-    @Published var query = ""
+    @Published var query = "" { didSet { queryRevision &+= 1 } }
+    private var queryRevision = 0
     @Published var actionItem: LauncherResult?
     @Published var showingPinPicker = false
     func pinCandidates(apps: [LaunchableApplication],config: WMConfiguration) -> [LauncherResult] {
@@ -108,7 +109,6 @@ final class LauncherModel: ObservableObject {
     @Published var usage = launcherPreferences.usage { didSet { cachedConfig = nil } }
     func saveUsage() { launcherPreferences.usage = usage; didChangeRoute?() }
     func togglePin(_ id: String) { usage.togglePin(id); saveUsage() }
-    func resetForOpening() { if !query.isEmpty { query = "" } }
     private var cachedApps: [LaunchableApplication] = []
     private var cachedConfig: WMConfiguration?
     private var cachedRunning = Set<String>()
@@ -173,27 +173,43 @@ final class LauncherModel: ObservableObject {
         }
         return cachedMatches
     }
+    func clearSubmittedQuery() {
+        query = ""; selectedID = ""
+        LauncherController.shared.calculator.update("")
+    }
     func choose(_ result: LauncherResult) {
+        let revision = queryRevision
+        // An asynchronous launch must not erase text entered after submission.
+        let complete = { if self.queryRevision == revision { self.clearSubmittedQuery() } }
+
         if case .openURL = result.action { /* Transient URLs are not saved in launch history. */ }
         else { usage.record(result.id); saveUsage() }
         switch result.action {
         case .openURL(let url):
             LauncherController.shared.dismiss()
-            if !NSWorkspace.shared.open(url) { LauncherController.shared.show(); message = "Could not open URL in the default browser." }
-        case .route(let route): navigate(route)
-        case .appearance(let mode): mode.save(); focusGeneration += 1
+            if NSWorkspace.shared.open(url) { complete() }
+            else { LauncherController.shared.show(); message = "Could not open URL in the default browser." }
+        case .route(let route): complete(); navigate(route)
+        case .appearance(let mode): mode.save(); complete(); focusGeneration += 1
         case .toggleSystemAppearance:
             SystemAppearance.toggle { error in
-                if let error { self.message = error } else if LauncherController.shared.isVisible && NSApp.isActive { LauncherController.shared.dismiss(restoreFocus:true) }
+                if let error { self.message = error }
+                else {
+                    complete()
+                    if LauncherController.shared.isVisible && NSApp.isActive { LauncherController.shared.dismiss(restoreFocus:true) }
+                }
             }
-        case .command(let id): WindowManager.shared.executeAction(id); LauncherController.shared.dismiss()
+        case .command(let id): WindowManager.shared.executeAction(id); complete(); LauncherController.shared.dismiss()
         case .application(let app):
             recentApps.removeAll { $0 == app.id }; recentApps.insert(app.id,at: 0); recentApps = Array(recentApps.prefix(20))
             UserDefaults.standard.set(recentApps,forKey: "launcher.recent-apps")
             LauncherController.shared.dismiss()
             let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = true
             NSWorkspace.shared.openApplication(at: app.url,configuration: configuration) { _,error in
-                if let error { DispatchQueue.main.async { LauncherController.shared.show(); self.message = error.localizedDescription } }
+                DispatchQueue.main.async {
+                    if let error { LauncherController.shared.show(); self.message = error.localizedDescription }
+                    else { complete() }
+                }
             }
         }
     }
@@ -276,7 +292,11 @@ final class LauncherController: NSObject, NSWindowDelegate {
     func show(_ route: LauncherRoute = .search,preview: Bool = false) {
         let start = CACurrentMediaTime()
         if !isVisible {
-            model.resetForOpening(); calculator.update("")
+            // Keep the search session across dismissals. Refresh a calculation
+            // without removing its last answer (notably dates and live rates).
+            if calculator.hasContent || calculator.pending {
+                calculator.update(model.query,force:true)
+            }
             if let app = NSApp.delegate as? App,app.panel?.isVisible == true {
                 previousFocus.inherit(from:app.previousFocus)
                 actionTarget = previousFocus.applicationPID.map { WMTarget(pid:$0,windowID:nil) }
@@ -555,6 +575,30 @@ final class LauncherController: NSObject, NSWindowDelegate {
                 checks["focus loss ends recording"] = !AppShortcuts.shared.recording
                 recorder.removeFromSuperview()
             }
+            self.show(preview:true)
+            if let editor = self.panel?.firstResponder as? NSTextView {
+                editor.selectAll(nil)
+                editor.insertText("Finder",replacementRange:NSRange(location:NSNotFound,length:0))
+                self.model.showingCommands = true
+                self.model.selectedID = "app:/System/Library/CoreServices/Finder.app"
+                editor.doCommand(by:#selector(NSResponder.cancelOperation(_:)))
+                checks["Escape closes populated launcher without clearing query"] = !self.isVisible && self.model.query == "Finder"
+                self.show(preview:true)
+                checks["reopening restores typed query in native editor"] = (self.panel?.firstResponder as? NSTextView)?.string == "Finder"
+                checks["reopening retains expanded state and selected result"] = self.model.showingCommands && self.model.selectedID == "app:/System/Library/CoreServices/Finder.app"
+                self.toggle(); self.toggle()
+                checks["hotkey close and reopen retains query"] = self.isVisible && self.model.query == "Finder"
+                self.dismiss(restoreFocus:true)
+                self.show(preview:true)
+                checks["dismiss and reopen retains query"] = self.model.query == "Finder"
+                self.model.query = "My Schedule"
+                self.model.choose(.init(id:"schedule",title:"My Schedule",detail:"Calendar",symbol:"calendar",action:.route(.schedule)))
+                checks["submitting a tool clears the main query"] = self.model.query.isEmpty && self.model.route == .schedule
+                self.model.back(); self.dismiss(); self.show(preview:true)
+                checks["reopening after submission stays clear"] = self.model.query.isEmpty && (self.panel?.firstResponder as? NSTextView)?.string == ""
+
+            } else { checks["launcher state regression has native editor"] = false }
+            self.dismiss(restoreFocus:true)
             let output: [String:Any] = ["checks":checks,"passed":checks.values.allSatisfy({$0}),"count":checks.count]
             if let data = try? JSONSerialization.data(withJSONObject:output,options:.prettyPrinted) { try? data.write(to:URL(fileURLWithPath:"/tmp/switcharoo-focus-regression.json")) }
             NSApp.terminate(nil)
@@ -676,7 +720,7 @@ struct LauncherView: View {
             ScrollView { CalculatorAnswerView(model:calculator,openGraph:{ model.navigate(.calculator) },replaceQuery:{ model.query = $0 }) }
         } else { resultList }
     }
-    private func exitSearch() { if model.route == .search && !model.query.isEmpty { model.query = "" } else if model.route == .search && model.showingCommands { model.showingCommands = false; LauncherController.shared.resize() } else { model.back() } }
+    private func exitSearch() { model.back() }
     @ViewBuilder private func resultIcon(_ result: LauncherResult,size: CGFloat) -> some View {
         if case .application(let app) = result.action { Image(nsImage: catalog.icon(app)).resizable().frame(width: size,height: size) }
         else { Image(systemName: result.symbol).font(SwitcharooTypography.ui(size: size-3,weight: .light)).frame(width: size,height: size) }
@@ -773,6 +817,7 @@ struct LauncherView: View {
     private func copyCalculationAndDismiss(raw: Bool = false,includeQuery: Bool = false) {
         guard calculator.canCopy else { return }
         calculator.copy(raw:raw,includeQuery:includeQuery)
+        model.clearSubmittedQuery()
         LauncherController.shared.dismiss(restoreFocus:true)
     }
     private func chooseSelected() {
