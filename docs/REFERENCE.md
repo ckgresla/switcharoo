@@ -93,7 +93,9 @@ After `./build.sh --build-only`, run `./test-calculator.sh` for worker calculati
 
 The main launcher retains its query, selected result, and compact/open state when
 dismissed and reopened. Escape dismisses the populated main bar without clearing it;
-subpage Escape still goes back. Existing calculator results stay visible while
+subpage Escape still goes back. Submitting an app, URL, command, tool, or calculator
+result clears the main query; failed app/URL launches keep it. An asynchronous
+launch cannot clear a newer query. Existing calculator results stay visible while
 refreshing on reopen. Search text is kept for the running session, not across app restarts.
 
 The compact composer is the saved placement anchor. Expansion preserves its screen
