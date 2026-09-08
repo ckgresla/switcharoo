@@ -91,6 +91,11 @@ MIT. See [third-party notices](../THIRD_PARTY_NOTICES.md) for the Rectangle impl
 
 After `./build.sh --build-only`, run `./test-calculator.sh` for worker calculations and process recovery. Pass an installed executable path as the first argument to test that bundle instead. The worker tests exercise the installed native SDK and bundled JavaScriptCore runtime. Interaction tests cover 20/100 ms debounce, stable results, cancellation, currency orchestration, and persistent history.
 
+The main launcher retains its query, selected result, and compact/open state when
+dismissed and reopened. Escape dismisses the populated main bar without clearing it;
+subpage Escape still goes back. Existing calculator results stay visible while
+refreshing on reopen. Search text is kept for the running session, not across app restarts.
+
 The compact composer is the saved placement anchor. Expansion preserves its screen
 coordinates: normally results grow below it, while low placements grow above it.
 When neither side fits the full content, results scroll within the available space

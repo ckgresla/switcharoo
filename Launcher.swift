@@ -108,7 +108,6 @@ final class LauncherModel: ObservableObject {
     @Published var usage = launcherPreferences.usage { didSet { cachedConfig = nil } }
     func saveUsage() { launcherPreferences.usage = usage; didChangeRoute?() }
     func togglePin(_ id: String) { usage.togglePin(id); saveUsage() }
-    func resetForOpening() { if !query.isEmpty { query = "" } }
     private var cachedApps: [LaunchableApplication] = []
     private var cachedConfig: WMConfiguration?
     private var cachedRunning = Set<String>()
@@ -276,7 +275,11 @@ final class LauncherController: NSObject, NSWindowDelegate {
     func show(_ route: LauncherRoute = .search,preview: Bool = false) {
         let start = CACurrentMediaTime()
         if !isVisible {
-            model.resetForOpening(); calculator.update("")
+            // Keep the search session across dismissals. Refresh a calculation
+            // without removing its last answer (notably dates and live rates).
+            if calculator.hasContent || calculator.pending {
+                calculator.update(model.query,force:true)
+            }
             if let app = NSApp.delegate as? App,app.panel?.isVisible == true {
                 previousFocus.inherit(from:app.previousFocus)
                 actionTarget = previousFocus.applicationPID.map { WMTarget(pid:$0,windowID:nil) }
@@ -555,6 +558,24 @@ final class LauncherController: NSObject, NSWindowDelegate {
                 checks["focus loss ends recording"] = !AppShortcuts.shared.recording
                 recorder.removeFromSuperview()
             }
+            self.show(preview:true)
+            if let editor = self.panel?.firstResponder as? NSTextView {
+                editor.selectAll(nil)
+                editor.insertText("Finder",replacementRange:NSRange(location:NSNotFound,length:0))
+                self.model.showingCommands = true
+                self.model.selectedID = "app:/System/Library/CoreServices/Finder.app"
+                editor.doCommand(by:#selector(NSResponder.cancelOperation(_:)))
+                checks["Escape closes populated launcher without clearing query"] = !self.isVisible && self.model.query == "Finder"
+                self.show(preview:true)
+                checks["reopening restores typed query in native editor"] = (self.panel?.firstResponder as? NSTextView)?.string == "Finder"
+                checks["reopening retains expanded state and selected result"] = self.model.showingCommands && self.model.selectedID == "app:/System/Library/CoreServices/Finder.app"
+                self.toggle(); self.toggle()
+                checks["hotkey close and reopen retains query"] = self.isVisible && self.model.query == "Finder"
+                self.dismiss(restoreFocus:true)
+                self.show(preview:true)
+                checks["dismiss and reopen retains query"] = self.model.query == "Finder"
+            } else { checks["launcher state regression has native editor"] = false }
+            self.dismiss(restoreFocus:true)
             let output: [String:Any] = ["checks":checks,"passed":checks.values.allSatisfy({$0}),"count":checks.count]
             if let data = try? JSONSerialization.data(withJSONObject:output,options:.prettyPrinted) { try? data.write(to:URL(fileURLWithPath:"/tmp/switcharoo-focus-regression.json")) }
             NSApp.terminate(nil)
@@ -676,7 +697,7 @@ struct LauncherView: View {
             ScrollView { CalculatorAnswerView(model:calculator,openGraph:{ model.navigate(.calculator) },replaceQuery:{ model.query = $0 }) }
         } else { resultList }
     }
-    private func exitSearch() { if model.route == .search && !model.query.isEmpty { model.query = "" } else if model.route == .search && model.showingCommands { model.showingCommands = false; LauncherController.shared.resize() } else { model.back() } }
+    private func exitSearch() { model.back() }
     @ViewBuilder private func resultIcon(_ result: LauncherResult,size: CGFloat) -> some View {
         if case .application(let app) = result.action { Image(nsImage: catalog.icon(app)).resizable().frame(width: size,height: size) }
         else { Image(systemName: result.symbol).font(SwitcharooTypography.ui(size: size-3,weight: .light)).frame(width: size,height: size) }
